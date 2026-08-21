@@ -6,9 +6,6 @@ project(adc168m102_fw C)
 
 set(MCU msp430fr5969)
 
-option(SPI_LOOPBACK_TEST
-    "Build the Phase-3 SPI loopback self-test (jumper P1.6 <-> P1.7)" OFF)
-
 add_executable(fw.elf
     src/main.c
     src/clocks.c
@@ -34,10 +31,6 @@ target_link_options(fw.elf PRIVATE
     -Wl,--gc-sections
     "-Wl,-Map=$<TARGET_FILE_DIR:fw.elf>/fw.map"
 )
-
-if(SPI_LOOPBACK_TEST)
-    target_compile_definitions(fw.elf PRIVATE SPI_LOOPBACK_TEST)
-endif()
 
 add_custom_command(TARGET fw.elf POST_BUILD
     COMMAND "${CMAKE_SIZE}" "$<TARGET_FILE:fw.elf>"

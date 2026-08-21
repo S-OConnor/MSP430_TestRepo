@@ -174,17 +174,14 @@ failed), `g_cfg` (raw CONFIG readback, expect `0x1041`), `g_sample_a`,
 1. `make flash` a clean build → heartbeat LED (P1.0) blinks 1 Hz.
 2. Scope on P2.2 (CLOCK) → a ~20 µs burst every 10 ms; `g_status` reads 0x0000
    with the 32 kHz source attached.
-3. SPI transport check without the ADC: jumper P1.6↔P1.7, reconfigure with
-   `-DSPI_LOOPBACK_TEST=ON`, rebuild and flash → slow LED blink = PASS, fast
-   blink = FAIL. (Switch back with `-DSPI_LOOPBACK_TEST=OFF`.)
-4. Wire the ADC per the table, power the EVM, reflash the normal build →
+3. Wire the ADC per the table, power the EVM, reflash the normal build →
    error LED stays off, `g_cfg` reads `0x1041` (link check pass), and ~2.5 V
    appears on the EVM REFIO test points.
-5. Feed known DC levels (0 / 2.5 / 5 V → ≈ −32768 / 0 / +32767) into J2.5
+4. Feed known DC levels (0 / 2.5 / 5 V → ≈ −32768 / 0 / +32767) into J2.5
    (CHA1) and J1.5 (CHB1); *different* levels on the two confirm that frame A
    and frame B are not swapped and that the mux is on pair 1 — grounding J2.3
    (CHA2) should change nothing.
-6. Soak: error LED stays off for minutes (`g_err_frame`/`g_err_busy` stay 0).
+5. Soak: error LED stays off for minutes (`g_err_frame`/`g_err_busy` stay 0).
 
 If frames come back shifted/corrupt at 8 MHz (see risk A in the plan), lower
 `ADC_SCLK_DIV` in [src/board.h](src/board.h) to 2 (4 MHz) or 4 (2 MHz).

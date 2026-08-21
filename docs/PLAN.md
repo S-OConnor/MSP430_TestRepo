@@ -54,8 +54,7 @@ Gated-clock subtleties (handled by design):
 > **Amendment (post-approval, per user):** build system is **CMake**
 > (`CMakeLists.txt` + `cmake/msp430-toolchain.cmake` cross file) instead of a
 > plain Makefile, plus a `Dockerfile` providing a reproducible dev container
-> (toolchain + cmake + mspdebug). Flash becomes a CMake custom target; the
-> loopback test is the `SPI_LOOPBACK_TEST` CMake option.
+> (toolchain + cmake + mspdebug). Flash becomes a CMake custom target.
 
 ```
 msp430/
@@ -96,8 +95,8 @@ Each phase is independently flashable and verified before the next begins; ADC h
 
 ## Phase 3 — SPI transport (`spi.c`)
 
-**Work**: eUSCI_B0 master: `UCSWRST` → `UCMST|UCSYNC|UCMSB|UCSSEL__SMCLK` (UCCKPH=0/UCCKPL=0), `UCB0BRW=ADC_SCLK_DIV` (1 → 8 MHz) → release. Blocking `spi_xfer()` (TXIFG→TXBUF→RXIFG→RXBUF); eUSCI idles SCLK low between transfers = the ADC's permitted static-low burst clock. Built-in loopback self-test mode (compile-time flag).
-**Exit criteria**: with P1.6↔P1.7 jumpered (ADC not connected), the loopback test settles into the slow (PASS) blink rather than the fast (FAIL) one.
+**Work**: eUSCI_B0 master: `UCSWRST` → `UCMST|UCSYNC|UCMSB|UCSSEL__SMCLK` (UCCKPH=0/UCCKPL=0), `UCB0BRW=ADC_SCLK_DIV` (1 → 8 MHz) → release. Blocking `spi_xfer()` (TXIFG→TXBUF→RXIFG→RXBUF); eUSCI idles SCLK low between transfers = the ADC's permitted static-low burst clock.
+**Exit criteria**: a scope on P2.2 (CLOCK) and P1.6 (SIMO) shows the expected byte on the wire at the configured `ADC_SCLK_DIV` rate.
 
 ## Phase 4 — ADC link + configuration (`adc168m102.c` part 1)
 

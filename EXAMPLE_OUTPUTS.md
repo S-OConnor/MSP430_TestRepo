@@ -139,16 +139,6 @@ Check the six constant bits before trusting any of it — `b0 & 0xC0 == 0x00`,
 aligned. The firmware runs the same check on every frame and latches the error
 LED when it fails.
 
-### SPI loopback self-test
-
-Built with `-DSPI_LOOPBACK_TEST=ON`, P1.6 jumpered to P1.7, ADC not required.
-The ADC bus stays silent; the result is on the heartbeat LED alone:
-
-| Blink rate | Meaning |
-|---|---|
-| Slow (~1 Hz) | PASS — 1000 bytes echoed back byte-for-byte |
-| Fast (5x quicker), error LED on | FAIL — check the P1.6↔P1.7 jumper and the eUSCI setup |
-
 ## Failure signatures
 
 | Symptom | Meaning | Where to look |

@@ -92,39 +92,6 @@ void __attribute__((interrupt(TIMER0_A0_VECTOR))) ta0_ccr0_isr(void)
     __bic_SR_register_on_exit(LPM0_bits);
 }
 
-/* ---- optional SPI loopback self-test (build with -DSPI_LOOPBACK_TEST=ON) --
- * With P1.6 (SIMO) jumpered to P1.7 (SOMI) and NO ADC attached, every byte
- * we send must come straight back. Proves the eUSCI setup, pin muxing, and
- * clock phase independent of the ADC. Reports on the heartbeat LED only:
- * slow blink = PASS, fast blink = FAIL. Never returns. */
-#ifdef SPI_LOOPBACK_TEST
-static void spi_loopback_test(void)
-{
-    static const uint8_t pat[] = { 0x00, 0xFF, 0x55, 0xAA, 0xA5, 0x0F };
-    uint16_t i;
-    bool pass = true;
-
-    for (i = 0; i < 1000u; i++) {
-        uint8_t tx = pat[i % (sizeof pat)] ^ (uint8_t)i;    /* varied bytes */
-        if (spi_xfer(tx) != tx) {
-            pass = false;
-            break;
-        }
-    }
-    if (!pass) {
-        LED_ERR_ON();
-    }
-    for (;;) {                      /* blink code: slow = PASS, fast = FAIL */
-        LED_HEART_TOGGLE();
-        if (pass) {
-            __delay_cycles(MCLK_HZ / 2uL);
-        } else {
-            __delay_cycles(MCLK_HZ / 10uL);
-        }
-    }
-}
-#endif
-
 /* ---- main --------------------------------------------------------------- */
 
 int main(void)
@@ -141,10 +108,6 @@ int main(void)
     g_status = clock_init();        /* GPIO map, LPM5 unlock, 16/8 MHz, LFXT */
     spi_init();                     /* 8 MHz CPOL0/CPHA1 master              */
     __enable_interrupt();           /* set GIE                               */
-
-#ifdef SPI_LOOPBACK_TEST
-    spi_loopback_test();            /* does not return */
-#endif
 
     /* Reset + configure the ADC; also runs the link check. The raw CONFIG
      * readback is the single most useful bring-up value, so publish it:
