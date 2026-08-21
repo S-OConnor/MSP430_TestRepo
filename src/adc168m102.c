@@ -11,7 +11,42 @@
  *  The part contains TWO 16-bit SAR converters (A and B) that sample at the
  *  same instant. In pseudo-differential mode (PDE=1) each converter sits
  *  behind a 4:1 input multiplexer, so a "pair k" conversion (k = 0..3)
- *  digitizes CHAk and CHBk together — four conversions cover all 8 channels.
+ *  digitizes CHAk and CHBk together.
+ *
+ *  This firmware wants exactly two channels, and they are a pair: CHA1 and
+ *  CHB1 (ADC_PAIR = 1 in board.h). That is the cheapest possible shape for
+ *  this part — ONE conversion per tick, both converters' results kept, and
+ *  the two samples taken at the same instant by construction. The mux
+ *  selection is a constant, so there is no channel rotation to get wrong.
+ *
+ *  --- Mux configuration: the pseudo-differential 4:1 mode --------------------
+ *
+ *  PDE=1 selects "4x2 pseudo-differential operation" (Table 7-2), which puts
+ *  each converter's front-end mux in the pseudo-differential 4:1 configuration
+ *  of Table 6-2: four single-ended inputs per converter, each measured against
+ *  that converter's common mode.
+ *
+ *      C[1:0]   ADC+     ADC-           (Table 6-2, restated in Table 7-2)
+ *        00     CHx0     CMx / REFIOx
+ *        01     CHx1     CMx / REFIOx   <- ADC_PAIR = 1
+ *        10     CHx2     CMx / REFIOx
+ *        11     CHx3     CMx / REFIOx
+ *
+ *  With PDE=0 the same two bits would instead pick one of TWO fully
+ *  differential pairs (Table 6-1) — a different configuration we do not use.
+ *
+ *  Which source acts as "CMx / REFIOx" is the REFCM register's job: its CMxx
+ *  bits pick the INTERNAL reference over the external CMA/CMB pins, and its
+ *  Rxx bits pick REFIO1 (our 2.5 V DAC) over REFIO2.
+ *
+ *  Beware one misleading sentence in §6.3.2.1: "In pseudo-differential mode,
+ *  channel selection is performed with the SEQFIFO register." That describes
+ *  AUTOMATIC channel selection, i.e. M0 = 1 (Table 6-5). We strap M0 = 0
+ *  (manual selection through SDI), and SEQFIFO keeps its reset value 0000h,
+ *  whose SL[1:0] = 00 field reads "Do not use; use mode I or II instead, where
+ *  M0 is 0". The sequencer is therefore inactive and C[1:0] above is what
+ *  steers the mux. Never writing SEQFIFO also satisfies REFCM's "set this
+ *  register after setting the SEQFIFO register" ordering note for free.
  *
  *  Unlike a normal SPI slave, the interface is built from five strobes/lines
  *  around the clock:
@@ -30,7 +65,8 @@
  *  high -> "Mode II" = channel pair chosen manually by a command word, data
  *  on SDOA only. We additionally set the SR ("special read") config bit, so
  *  ONE RD pulse followed by 40 CLOCKs streams converter A's frame and then
- *  converter B's frame back-to-back on SDOA.
+ *  converter B's frame back-to-back on SDOA — i.e. a single readout delivers
+ *  both of the channels we care about.
  *
  *  Frame format (CID=0, 20 clocks per converter):
  *
@@ -49,8 +85,9 @@
  *    15 14 | 13 12 | 11 10 | 9  | 8  | 7  | 6   | 5   | 4  | 3..0
  *    C[1:0]| R[1:0]| PD    | FE | SR | FC | PDE | CID | CE | A[3:0]
  *
- *    C   next channel pair       R   write mode (00 = update C only,
- *    PD  power-down control          01 = rewrite whole CONFIG)
+ *    C   next input, per the      R   write mode (00 = update C only,
+ *        table above                     valid because M0=0; 01 = rewrite
+ *    PD  power-down control              the whole CONFIG register)
  *    FE  FIFO enable             SR  special read (both frames per RD)
  *    FC  full-clock mode         PDE pseudo-differential enable
  *    CID channel-ID disable      CE  2-bit counter enable
@@ -59,7 +96,17 @@
  * =============================================================================
  */
 
-static uint16_t s_link_readback;    /* raw CONFIG readback, shown in banner */
+static uint16_t s_link_readback;    /* raw CONFIG readback, published as g_cfg */
+
+/* Operating CONFIG word: the fixed mode bits plus C = ADC_PAIR, so the first
+ * conversion after configuration already selects the pair we stream
+ * (pair 1 -> 0x5140). */
+#define ADC168_W_CONFIG \
+    ((uint16_t)(ADC168_W_CONFIG_BASE | ((uint16_t)(ADC_PAIR & 0x03) << 14)))
+
+/* The same C field as it sits in the FIRST byte of a 16-bit command word
+ * (word bits 15:14 = byte bits 7:6). */
+#define ADC168_CWORD_BYTE   ((uint8_t)((ADC_PAIR & 0x03) << 6))
 
 /*
  * Write one 16-bit word into the ADC.
@@ -132,9 +179,9 @@ uint8_t adc168_init(void)
     }
 
     /* Real operating configuration: R=01 (rewrite whole register),
-     * SR=1 (both frames per RD pulse), PDE=1 (8 pseudo-diff channels),
-     * CID=0 (keep indicator bits — our per-frame validation), C=00
-     * (first conversion will be pair 0). */
+     * SR=1 (both frames per RD pulse), PDE=1 (pseudo-differential inputs),
+     * CID=0 (keep indicator bits — our per-frame validation), C=ADC_PAIR
+     * (the first conversion is already the pair we stream). */
     write_word(ADC168_W_CONFIG);
 
     /* --- Reference bring-up ----------------------------------------------
@@ -148,9 +195,12 @@ uint8_t adc168_init(void)
     write_word(ADC168_W_REFDAC_2V5);
 
     /* REFCM register (A=1100 then the value): route the internal reference
-     * (REFIO1, now 2.5 V) as the pseudo-differential "negative input" for
-     * all 8 channels. This gives every channel a 2.5 V +- 2.5 V input range
-     * with NO jumper changes on the EVM. */
+     * (REFIO1, now 2.5 V) as the pseudo-differential "negative input" — the
+     * "CMx / REFIOx" column of Table 6-2. CMxx=1 picks the internal source
+     * over the external CMA/CMB pins; Rxx=0 picks REFIO1 over REFIO2. Only
+     * the ADC_PAIR channels are ever read, but arming all 8 bits costs
+     * nothing and keeps ADC_PAIR a one-line change. Every channel then has a
+     * 2.5 V +- 2.5 V input range with NO jumper changes on the EVM. */
     write_word(ADC168_W_PTR_REFCM);
     write_word(ADC168_W_REFCM_INT);
 
@@ -161,10 +211,10 @@ uint8_t adc168_init(void)
     /* Mode-change pipeline flush: SR/PDE/CID edits take effect "from the
      * next conversion with a delay of one read access" (§6.5.2.2). Burn two
      * complete conversion+read cycles so the streaming loop only ever sees
-     * settled SR=1 framing — and so the channel pipeline is primed at
-     * pair 0 for the first real scan. */
+     * settled SR=1 framing. Each of them also re-commands ADC_PAIR, so the
+     * mux is primed for the first real sample. */
     for (i = 0; i < 2; i++) {
-        (void)adc168_read_pair(0, &d0, &d1);
+        (void)adc168_read(&d0, &d1);
     }
 
     return status;
@@ -176,9 +226,9 @@ uint16_t adc168_link_readback(void)
 }
 
 /*
- * One complete conversion + readout cycle.
+ * One complete conversion + readout cycle — the entire per-tick ADC workload.
  *
- *  Timeline (8 MHz SCLK; total ~10 us of bus time per pair):
+ *  Timeline (8 MHz SCLK; total ~10 us of bus time):
  *
  *    CONVST _|‾|__________________________________________________
  *    CLOCK  ____xxxxxxxxxxxxxxxxxxxxxxxx____xxxx...xxxx___________
@@ -187,17 +237,18 @@ uint16_t adc168_link_readback(void)
  *    RD     _______________________________|‾|_____________________
  *    SDOA   ------------------------------------[frame A][frame B]-
  *
- *  `next_pair` is PIPELINED: the command word shifted during THIS readout
- *  selects the mux input for the NEXT conversion. The caller compensates
- *  (see the scan loop in main.c); init pre-loads pair 0.
+ *  The channel-select command is PIPELINED: the C field shifted during THIS
+ *  readout selects the mux input for the NEXT conversion. We always send
+ *  ADC_PAIR, so the selection is self-sustaining — every access re-asserts
+ *  the same pair, and init already primed it through the CONFIG word.
  */
-adc168_result_t adc168_read_pair(uint8_t next_pair, int16_t *a, int16_t *b)
+adc168_result_t adc168_read(int16_t *a, int16_t *b)
 {
-    /* Build the command byte: C[1:0] into bits 7:6 of the FIRST byte of the
-     * 16-bit word (= word bits 15:14). R stays 00 = "update the channel
-     * selection only, touch nothing else" — so a corrupted transfer can at
-     * worst convert the wrong pair once, never wreck the configuration. */
-    const uint8_t cword = (uint8_t)((next_pair & 0x03u) << 6);
+    /* Command byte: C[1:0] in bits 7:6 of the FIRST byte of the 16-bit word
+     * (= word bits 15:14). R stays 00 = "update the channel selection only,
+     * touch nothing else" — so a corrupted transfer can at worst convert the
+     * wrong pair once, and the next access puts it straight back. */
+    const uint8_t cword = ADC168_CWORD_BYTE;
     uint8_t rx[5];
     uint16_t ua, ub;
     uint16_t tries = ADC_BUSY_TIMEOUT;
@@ -217,7 +268,7 @@ adc168_result_t adc168_read_pair(uint8_t next_pair, int16_t *a, int16_t *b)
      * required ~17.5 conversion + 2 acquisition clocks. No RD pulse was
      * issued, so the ADC is not driving SDOA and ignores SDI — but we put
      * the command byte in the first slot anyway: if the part latched it
-     * unexpectedly it would command the SAME next_pair (harmless). */
+     * unexpectedly it would command the SAME pair (harmless). */
     (void)spi_xfer(cword);
     (void)spi_xfer(0x00);
     (void)spi_xfer(0x00);
@@ -231,8 +282,8 @@ adc168_result_t adc168_read_pair(uint8_t next_pair, int16_t *a, int16_t *b)
     }
 
     /* Readout: RD falling edge starts frame A; 40 clocks (5 bytes) stream
-     * frame A then frame B on SDOA (SR=1). Simultaneously, the first 16
-     * clocks latch our next-pair command word from SDI. */
+     * frame A (CHA<ADC_PAIR>) then frame B (CHB<ADC_PAIR>) on SDOA (SR=1).
+     * Simultaneously, the first 16 clocks latch our command word from SDI. */
     ADC_RD_PULSE();
     rx[0] = spi_xfer(cword);        /* also: command word byte 1 */
     rx[1] = spi_xfer(0x00);         /* also: command word byte 2 (0x00) */

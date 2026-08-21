@@ -12,7 +12,6 @@ option(SPI_LOOPBACK_TEST
 add_executable(fw.elf
     src/main.c
     src/clocks.c
-    src/uart.c
     src/spi.c
     src/adc168m102.c
 )
@@ -57,11 +56,5 @@ add_custom_target(flash
 add_custom_target(flash-ezfet
     COMMAND mspdebug ezfet "prog $<TARGET_FILE:fw.elf>"
     DEPENDS fw.elf
-    USES_TERMINAL
-)
-
-# Backchannel UART: eZ-FET's second CDC ACM port (usually /dev/ttyACM1).
-add_custom_target(term
-    COMMAND picocom -b 115200 /dev/ttyACM1
     USES_TERMINAL
 )

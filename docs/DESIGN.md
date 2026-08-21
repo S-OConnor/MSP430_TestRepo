@@ -13,9 +13,9 @@ Contents:
 4. [The trick that makes SPI work anyway: the gated clock](#4-the-trick-that-makes-spi-work-anyway-the-gated-clock)
 5. [The MSP430 side: clocks, pins, peripherals](#5-the-msp430-side-clocks-pins-peripherals)
 6. [Talking to the ADC, step by step](#6-talking-to-the-adc-step-by-step)
-7. [Reading 8 channels: pairs and the pipeline](#7-reading-8-channels-pairs-and-the-pipeline)
+7. [Reading two channels: why a pair](#7-reading-two-channels-why-a-pair)
 8. [Timing: the 100 Hz tick](#8-timing-the-100-hz-tick)
-9. [Getting data to the PC: the UART](#9-getting-data-to-the-pc-the-uart)
+9. [Getting at the data: the scope](#9-getting-at-the-data-the-scope)
 10. [Putting it together: one tick, start to finish](#10-putting-it-together-one-tick-start-to-finish)
 11. [Number formats and how to interpret the output](#11-number-formats-and-how-to-interpret-the-output)
 12. [What can go wrong and how the firmware reacts](#12-what-can-go-wrong-and-how-the-firmware-reacts)
@@ -67,16 +67,39 @@ The ADC168M102R-SEP contains **two** independent 16-bit converters, "A" and
 ```
 
 We tell it which mux position to use (0, 1, 2 or 3), and one conversion
-then delivers **channel pair k = (CHAk, CHBk)**. Four conversions with
-k = 0,1,2,3 read all eight channels. That is the whole "8-channel scan".
+then delivers **channel pair k = (CHAk, CHBk)**.
+
+This firmware needs only **two** channels, and it picks them from the same
+mux position: **CHA1 and CHB1** (pair 1). That choice is what makes the
+whole acquisition a single conversion per tick — see
+[section 7](#7-reading-two-channels-why-a-pair).
 
 ### Pseudo-differential inputs and common mode
 
 Each converter actually measures a *difference* between a positive and a
-negative input. In "pseudo-differential" mode (which we use, `PDE=1`) the
-negative input is a fixed voltage called the **common mode**, and the eight
-CHxx pins are the positive inputs. We route the internal 2.5 V reference to
-be that common mode. Consequence: every channel measures its input relative
+negative input. The mux in front of it can be wired up two ways, and we
+choose the second:
+
+| `PDE` | Configuration | Inputs per converter |
+|---|---|---|
+| 0 | Fully differential 2:1 (datasheet Table 6-1) | 2 pairs, each measured against its own negative pin |
+| **1** | **Pseudo-differential 4:1 (Table 6-2)** | **4 single-ended inputs, all measured against a shared common mode** |
+
+In the **pseudo-differential 4:1** configuration the negative input is a
+fixed voltage called the **common mode**, and the four CHxx pins per
+converter are the positive inputs — eight in total. The same `C[1:0]` bits
+that would pick one of two differential pairs now pick one of four
+single-ended inputs:
+
+```
+  C[1:0]   ADC+     ADC-
+    00     CHx0     CMx / REFIOx
+    01     CHx1     CMx / REFIOx     <- what this firmware uses
+    10     CHx2     CMx / REFIOx
+    11     CHx3     CMx / REFIOx
+```
+
+We route the internal 2.5 V reference to be that common mode. Consequence: each channel measures its input relative
 to 2.5 V, giving a ±2.5 V range around 2.5 V — i.e. 0 V to 5 V:
 
 | Input voltage | Output code (two's complement) |
@@ -194,10 +217,10 @@ There are two subtle consequences the driver handles explicitly:
 
 A 16-bit microcontroller with 64 KB of FRAM (non-volatile memory that is
 also writable like RAM), 2 KB SRAM, and a set of on-chip peripherals. The
-ones we use: **eUSCI_B0** (configured as SPI), **eUSCI_A0** (configured as
-UART, wired on the LaunchPad to the USB debug chip so it shows up on the
-PC as a serial port), **Timer_A0** (for the 100 Hz tick), and the **clock
-system** that generates the CPU and peripheral clocks.
+ones we use: **eUSCI_B0** (configured as SPI), **Timer_A0** (for the 100 Hz
+tick), and the **clock system** that generates the CPU and peripheral
+clocks. That is deliberately the whole list — there is no serial peripheral
+in this firmware.
 
 ### 5.2 Clock tree
 
@@ -205,17 +228,15 @@ system** that generates the CPU and peripheral clocks.
  external 32.768 kHz  ─(LFXIN, bypass mode)──> ACLK  32768 Hz ──> Timer_A0
                                                                    (sample tick)
  internal DCO 16 MHz ──┬──────────────────────> MCLK  16 MHz  ──> CPU
-                       └──(÷2)────────────────> SMCLK  8 MHz  ──> SPI clock,
-                                                                   UART baud gen.
+                       └──(÷2)────────────────> SMCLK  8 MHz  ──> SPI clock
 ```
 
 - **DCO** = digitally-controlled oscillator, the chip's internal RC clock.
   16 MHz for the CPU means FRAM needs one *wait state* (FRAM is only rated
   to 8 MHz), which is why `clocks.c` writes `FRCTL0` before raising the
   clock.
-- **SMCLK at 8 MHz** is what the SPI and UART divide down from. SPI ÷1 →
-  8 MHz SCLK. UART: 8 MHz / 115200 = 69.44 → the oversampling baud
-  generator settings in `uart.c`.
+- **SMCLK at 8 MHz** is what the SPI divides down from: ÷1 → 8 MHz SCLK,
+  which is the ADC's CLOCK.
 - **ACLK from LFXIN in bypass mode.** "Bypass" means "there is no crystal,
   an external logic-level clock is being fed in" — the user's 32.768 kHz
   square wave. If it is missing, an oscillator-fault flag stays latched;
@@ -234,13 +255,23 @@ system** that generates the CPU and peripheral clocks.
 | P2.6 | GPIO output | CONVST (13) |
 | P4.2 | GPIO output | RD (11) |
 | P1.5 | GPIO input, pulldown | BUSY (5) |
-| P2.0 / P2.1 | eUSCI_A0 TXD/RXD | (to eZ-FET → USB serial) |
 | PJ.4 | LFXIN | external 32.768 kHz |
 | P1.0 / P4.6 | GPIO | LEDs (heartbeat / error) |
 
+The two analog inputs are not MSP430 pins at all — they go straight into
+the EVM's op-amp buffers on its own headers:
+
+| ADC channel | EVM header pin | Buffer | On SDOA |
+|---|---|---|---|
+| CHA1 | J2 pin 5 (even pins GND) | OPA4H014-SEP U2C | frame A |
+| CHB1 | J1 pin 5 (even pins GND) | OPA4H014-SEP U1C | frame B |
+
+Those buffers need the ±8 V supplies on J3/J4. The other six channel inputs
+are left open.
+
 MSP430 pins are multi-function; two "select" bits per pin decide whether
 the pin is plain GPIO or belongs to a peripheral. `clocks.c` sets those
-(`PxSEL1`/`PxSEL0`) for the SPI, UART and LFXIN pins. FRAM-family parts
+(`PxSEL1`/`PxSEL0`) for the SPI and LFXIN pins. FRAM-family parts
 also keep all pins in high-impedance after reset until a lock bit
 (`LOCKLPM5`) is cleared — done right after pin configuration.
 
@@ -285,7 +316,8 @@ write: first the CONFIG word carrying the address, then the value.
  3. write 0x1041                  R=01, PDE=1, A=0001 -> "send CONFIG back"
  4. RD + read 3 bytes             the readback arrives; check bits 11:4 == 0x04
                                   (PDE=1, all else 0). Wrong -> ST_ADC_NOLINK.
- 5. write 0x1140                  R=01, SR=1, PDE=1, CID=0, C=00 (real config)
+ 5. write 0x5140                  R=01, SR=1, PDE=1, CID=0, C=01 (real config;
+                                  C = ADC_PAIR, so conversion 1 is pair 1)
  6. write 0x1142 then 0x03FF      REFDAC1 <- enable, 2.5 V
  7. write 0x1145 then 0x03FF      REFDAC2 <- enable, 2.5 V
  8. write 0x114C then 0xFF00      REFCM   <- all channels use REFIO1 as common mode
@@ -295,12 +327,30 @@ write: first the CONFIG word carrying the address, then the value.
 
 Step 4 is the **link check**: if MISO is dead (open wire, ADC unpowered,
 wrong strap) we read all-zeros or all-ones and the mode bits will not
-match — the banner then reports `status=0x0002` and shows the raw value.
+match — the firmware then sets `ST_ADC_NOLINK`, lights the error LED before
+the first tick, and parks the raw value in `g_cfg` for the debugger. Note
+that `g_cfg` is the *link-check* readback (`0x1041`), captured at step 4 —
+before the operating word of step 5 is written, so it does not carry the
+channel selection.
 
 Steps 6–8 matter because the internal references are **off by default**;
-without them the ADC would convert against nothing.
+without them the ADC would convert against nothing. Step 8 is what makes the
+pseudo-differential 4:1 configuration usable: the `CMxx` bits choose the
+*internal* reference over the external CMA/CMB pins, and the `Rxx` bits
+choose REFIO1 (the 2.5 V DAC from step 6) over REFIO2. Writing `0xFF00` arms
+all eight channels even though only two are read — it costs one word and
+keeps `ADC_PAIR` a one-line change.
 
-### 6.3 One conversion + readout (`adc168_read_pair()`)
+> **A datasheet trap.** §6.3.2.1 says "In pseudo-differential mode, channel
+> selection is performed with the SEQFIFO register." That sentence is about
+> *automatic* channel selection, which is `M0 = 1` (Table 6-5). We strap
+> `M0 = 0` — manual selection through SDI — so `C[1:0]` steers the mux, per
+> Table 6-2. SEQFIFO is never written; its reset value has `SL = 00`, whose
+> own description reads "Do not use; use mode I or II instead, where M0 is
+> 0". Leaving it alone also satisfies REFCM's "set this register after
+> setting the SEQFIFO register" ordering note for free.
+
+### 6.3 One conversion + readout (`adc168_read()`)
 
 ```
    CONVST  _|‾|________________________________________________
@@ -309,7 +359,7 @@ without them the ADC would convert against nothing.
    BUSY    ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|______________________________
    RD      _______________________________|‾|__________________
    SDOA    ---------------------------------[frame A ][frame B ]
-   SDI     [next-pair cmd]-------------------[next-pair cmd]---
+   SDI     [pair cmd]----------------------------[pair cmd]---
 ```
 
 1. **Check BUSY is low.** (Datasheet: never raise CONVST during a
@@ -317,14 +367,15 @@ without them the ADC would convert against nothing.
 2. **Pulse CONVST** (two GPIO writes, ~190 ns, clock is idle).
    Sample-and-holds freeze; conversion is armed.
 3. **Send 3 dummy bytes = 24 clocks.** The conversion needs about 18 of
-   them; the extra are margin. (We put the next-pair command in the first
+   them; the extra are margin. (We put the channel command in the first
    byte too — harmless if ignored, correct if latched.)
 4. **Wait for BUSY low** with a bounded loop (it drops during the burst;
    the wait is a safety net that becomes an error if it times out).
 5. **Pulse RD.** The ADC starts driving frame A on SDOA and opens the
    16-clock command window on SDI.
-6. **Transfer 5 bytes = 40 clocks.** MISO returns frame A then frame B;
-   MOSI carries the next-pair command in the first two bytes.
+6. **Transfer 5 bytes = 40 clocks.** MISO returns frame A (CHA1) then
+   frame B (CHB1); MOSI carries the channel command in the first two bytes.
+   Both channels we want are in this one burst — nothing is discarded.
 7. **Reassemble and validate.** The 40 received bits are:
 
 ```
@@ -341,29 +392,45 @@ without them the ADC would convert against nothing.
    (`ADC168_ERR_BAD_FRAME`).
 
 Total: ~64 clocks ≈ 8 µs of bus time plus a few µs of overhead — about
-20 µs per pair, 80 µs for all four.
+20 µs, and that is the entire ADC workload of a tick.
 
 ---
 
-## 7. Reading 8 channels: pairs and the pipeline
+## 7. Reading two channels: why a pair
 
-The channel-select command is **pipelined**: the C value we send during
-*this* readout chooses the mux position for the *next* conversion. So the
-scan loop in `main.c` reads pair k while asking for pair (k+1) mod 4:
+We want two channels. The part offers eight, arranged as four pairs, and
+the hardware always converts a whole pair at once. So there are two ways to
+pick two channels:
+
+| Choice | Conversions per tick | Simultaneous? |
+|---|---|---|
+| Two channels on the **same** converter (e.g. CHA1 + CHA2) | 2 — one per mux position, with the other converter's result thrown away each time | No: ~20 µs apart |
+| Two channels forming a **pair** (CHA1 + CHB1) | 1 | Yes — one CONVST freezes both |
+
+This design takes the second: **CHA1 and CHB1**, i.e. pair 1. Both results
+arrive in the single 40-clock readout that `SR=1` gives us, so nothing is
+converted and discarded.
+
+The choice also removes a class of bug. The channel-select command is
+**pipelined**: the C value sent during *this* readout chooses the mux
+position for the *next* conversion. A rotating scan therefore has to stay
+one step ahead of itself, and an off-by-one shows up as data in the wrong
+columns. Here C is a compile-time constant:
 
 ```
-  tick n:   convert pair 0 (ask for 1)   -> a0, b0
-            convert pair 1 (ask for 2)   -> a1, b1
-            convert pair 2 (ask for 3)   -> a2, b2
-            convert pair 3 (ask for 0)   -> a3, b3     <- ADC now primed for pair 0
-  tick n+1: convert pair 0 (ask for 1)   ...
+  init:     CONFIG word carries C = 1        -> conversion 1 will be pair 1
+  tick n:   convert pair 1 (ask for 1)   -> a1, b1
+  tick n+1: convert pair 1 (ask for 1)   -> a1, b1
+  ...
 ```
 
-The very first conversion after init is pair 0 because the init CONFIG
-word wrote C = 00 (and the two throw-away cycles keep it there).
+Every access re-asserts the same selection, so the pipeline is
+self-correcting: if a command word were ever corrupted on the wire, at
+worst one sample comes from the wrong pair and the next access puts it back.
 
-Because converters A and B fire together, `a_k` and `b_k` are sampled at
-the *same instant*; the four pairs are ~20 µs apart within a tick.
+To acquire a different pair, change `ADC_PAIR` in `board.h`. It feeds the C
+field of the init CONFIG word, the C field of every per-conversion command,
+— nothing else in the firmware refers to the channel numbers.
 
 ---
 
@@ -382,9 +449,10 @@ Exactly 100 Hz is impossible from 32 768 Hz with an integer divider
 number is preferred, 320 gives 102.4 Hz — one constant in `board.h`.
 
 The interrupt handler only sets a flag and wakes the CPU. The main loop
-sleeps in **LPM0** between ticks — a low-power mode that stops the CPU
-but keeps SMCLK alive, which the UART needs to keep shifting out the
-previous line while we sleep.
+sleeps in **LPM0** between ticks — a low-power mode that stops the CPU but
+keeps SMCLK alive. The deeper LPM3 would stop SMCLK, and SMCLK is exactly
+what clocks the tick timer in the no-LFXT fallback below — so LPM3 would
+leave that configuration asleep forever.
 
 Fallback: if the external oscillator is absent, the timer runs from
 SMCLK/8 = 1 MHz with a period of 10 000 → exactly 100 Hz, but only as
@@ -392,25 +460,43 @@ accurate as the DCO (~±2 %). `status` bit 0x01 reports this.
 
 ---
 
-## 9. Getting data to the PC: the UART
+## 9. Getting at the data: the scope
 
-A **UART** sends bytes one bit at a time over a single wire at an agreed
-speed (115200 bits/s here). The LaunchPad's debug chip (eZ-FET) turns
-this into a USB serial port on the PC.
+There is no link to a PC. The ADC's results leave the *ADC*, on SDOA, and
+that wire is where you read them — the MSP430 never needs to repeat them.
+This is the deliberate simplification of the design: no serial peripheral,
+no ring buffer, no interrupt-driven transmit, and no way for a slow host to
+perturb the sample timing.
 
-At 115200 baud, a 74-byte CSV line takes ~6.4 ms — most of a 10 ms tick.
-If `main()` wrote it synchronously it would starve the next sample. So:
+**Where to probe.** SDOA (EVM J5.1) is the data. CONVST (J5.13) is the
+trigger: it pulses once per tick, with ~10 ms of quiet either side, so a
+rising-edge single-shot capture lands on a whole acquisition every time.
+CLOCK (J5.7) gives the analyzer its bit clock, and BUSY (J5.5) shows the
+conversion itself. Sample MISO on the CLOCK **falling** edge (§2).
 
-- `uart_write()` copies the line into a **256-byte ring buffer** and
-  returns immediately.
-- The **transmit interrupt** feeds one byte at a time from the ring into
-  the hardware whenever the hardware is ready, in the background.
-- If the ring is ever full (PC stopped reading), the *whole line* is
-  dropped and counted — never a partial line, so the stream stays
-  parseable.
+**What one tick looks like.** One 24-clock burst converts, one 40-clock
+burst reads out:
 
-Baud-rate maths (from the MSP430 user's guide): 8 MHz / 115200 = 69.44;
-oversampling mode gives UCBR = 4, UCBRF = 5, UCBRS = 0x55.
+```
+   CONVST  _|‾|________________________________________________
+   CLOCK   ____24 conversion clocks____40 readout clocks_______
+   BUSY    ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|_______________________________
+   RD      _______________________|‾|_________________________
+   SDOA    -------------------------[ frame A ][ frame B ]----
+```
+
+A logic analyzer with an SPI decoder set to CPOL=0/CPHA=1, MSB first, will
+give you the five readout bytes directly; §11 turns them into numbers.
+
+**What the LEDs tell you.** LED1 (red, P1.0) toggles every 50 ticks, so a
+steady 1 Hz blink means the loop is running at the right rate — and it
+doubles as a free 1 Hz timebase reference on the scope. LED2 (green, P4.6)
+latches on if init failed or any frame has ever failed validation.
+
+**What the debugger tells you.** Every value the firmware computes lives in
+a `volatile` global, so halting the target with `mspdebug` and dumping them
+is the fallback for anything the scope cannot show: `g_sample_a`,
+`g_sample_b`, `g_tick`, `g_err_frame`, `g_err_busy`, `g_status`, `g_cfg`.
 
 ---
 
@@ -418,37 +504,52 @@ oversampling mode gives UCBR = 4, UCBRF = 5, UCBRS = 0x55.
 
 ```
   t = 0        Timer_A0 CCR0 interrupt: g_tick_pending = 1, wake CPU
-  t ≈ 2 µs     main loop resumes, g_tick++
-  t ≈ 2–82 µs  4 x adc168_read_pair()  (CONVST/24clk/BUSY/RD/40clk each)
-  t ≈ 82–130 µs format "tick,a0..a3,b0..b3,errs\r\n" into a buffer
-  t ≈ 130 µs   uart_write(): copy into ring, enable TX interrupt
-  t ≈ 135 µs   LED bookkeeping, back to LPM0 sleep
-  t ≈ 0.1–6.5 ms UART interrupt shifts the line out, ~87 µs per byte
+  t ≈ 2 µs     main loop resumes
+  t ≈ 2–22 µs  adc168_read()  (CONVST / 24 clk / BUSY / RD / 40 clk)
+                 <-- this is the whole burst the scope sees
+  t ≈ 22 µs    publish g_sample_a / g_sample_b / g_tick
+  t ≈ 25 µs    LED bookkeeping, back to LPM0 sleep
   t = 10.01 ms next tick
 ```
 
-CPU is awake ~1.5 % of the time.
+CPU is awake well under 1 % of the time, and the bus is idle for 99.8 % of
+each tick — which is why a single-shot trigger on CONVST is unambiguous.
 
 ---
 
-## 11. Number formats and how to interpret the output
+## 11. Number formats: decoding a readout burst by hand
+
+The 40 readout clocks carry two 20-bit frames back to back:
 
 ```
-# adc168m102 fw v0.1 status=0x0000 cfg=0x1041
-# tick,a0,a1,a2,a3,b0,b1,b2,b3,errs
-1,-16234,3,1023,-508,12,900,-3,88,0
+   bit  39 38 | 37 ......... 22 | 21 20 | 19 18 | 17 .......... 2 | 1 0
+        0  0  |  result A       | 0  0  | 0  1  |  result B       | 0 0
+        ^  ^                             ^  ^
+        |  +-- converter A indicator (0) |  +-- converter B indicator (1)
+        +-- constant leading zero        +-- constant leading zero
 ```
 
-- `#` lines are comments (banner and column header).
-- `tick` counts up from 1 at ~99.9 Hz.
-- `a0..a3` = CHA0..CHA3, `b0..b3` = CHB0..CHB3, signed 16-bit codes.
-  Voltage ≈ 2.5 V + code × (2.5 V / 32768) = 2.5 V + code × 76.3 µV.
-  A value of exactly −32768 in a *pair* whose other member is also −32768
-  is the firmware's "this reading was invalid" marker.
-- `errs` = cumulative count of frame validation failures + BUSY timeouts +
-  dropped UART lines. Healthy = stays 0.
-- `status`: 0x01 external clock missing (fallback tick), 0x02 ADC link
-  check failed. `cfg` is the raw CONFIG readback (0x1041 expected).
+As five bytes off an SPI decoder (`b0`..`b4`), that is:
+
+```
+   CHA1 code = ((b0 & 0x3F) << 10) | (b1 << 2) | (b2 >> 6)
+   CHB1 code = ((b2 & 0x03) << 14) | (b3 << 6) | (b4 >> 2)
+```
+
+Both are **signed 16-bit two's complement**, and both were sampled at the
+same instant. Voltage ≈ 2.5 V + code × (2.5 V / 32768) = 2.5 V + code ×
+76.3 µV, so 0 V ≈ −32768, 2.5 V ≈ 0, 5 V ≈ +32767.
+
+The six constant bits (`b0 & 0xC0 == 0x00`, `b2 & 0x3C == 0x04`,
+`b4 & 0x03 == 0x00`) are the sanity check: if they are wrong, the bit
+alignment is off and the numbers mean nothing. The firmware checks them on
+every frame too, and lights the error LED when one fails.
+
+In the debugger the same two values are already decoded, in `g_sample_a`
+and `g_sample_b`. There, both reading exactly −32768 is the firmware's
+"this reading was invalid" marker — though a real 0 V input also gives
+−32768, so it only means something alongside a rising `g_err_frame` or
+`g_err_busy`.
 
 ---
 
@@ -456,12 +557,12 @@ CPU is awake ~1.5 % of the time.
 
 | Symptom | Likely cause | Firmware behaviour | What to do |
 |---|---|---|---|
-| `status=0x0001` | 32.768 kHz source not reaching LFXIN | Runs at DCO 100 Hz, error LED on | Check the square wave amplitude (0–3.3 V) and connection to PJ.4; remove crystal Y1 |
-| `status=0x0002`, `cfg=0x0000`/`0xFFFF` | SDOA/SDI/RD/~CS wiring, ADC unpowered, PHI board still attached | Keeps running; all frames will fail | Check J5 wiring, DVDD/AVDD, M0 strap, PHI removed |
-| `errs` climbing, values garbage | Clock phase / strobe timing / long jumper wires at 8 MHz | Bad frames rejected and counted | Set `ADC_SCLK_DIV` to 2 or 4 in `board.h` (risk A in PLAN.md) |
-| Values look right but in the wrong columns | Pipeline phase off by one | — | Verify with distinct DC levels per channel; see scan-loop comment in `main.c` |
-| All channels read ≈ −32768 or ≈ 0 with inputs applied | References not enabled / not settled | — | Check init ran (banner), 2.5 V on EVM REFIO test points, ±8 V op-amp supplies present |
-| Lines missing | Host not draining serial fast enough | Whole lines dropped, counted in `errs` | Use a real terminal/logger at 115200 |
+| Error LED on, `g_status = 0x01` | 32.768 kHz source not reaching LFXIN | Runs at DCO 100 Hz | Check the square wave amplitude (0–3.3 V) and connection to PJ.4; remove crystal Y1 |
+| Error LED on, `g_status = 0x02`, `g_cfg = 0x0000`/`0xFFFF` | SDOA/SDI/RD/~CS wiring, ADC unpowered, PHI board still attached | Keeps running; all frames will fail | Check J5 wiring, DVDD/AVDD, M0 strap, PHI removed |
+| `g_err_frame` climbing, SDOA looks shifted | Clock phase / strobe timing / long jumper wires at 8 MHz | Bad frames rejected and counted | Set `ADC_SCLK_DIV` to 2 or 4 in `board.h` (risk A in PLAN.md) |
+| Frame A and frame B swapped, or a signal in neither | Analog wiring | — | CHA1 is EVM **J2** pin 5, CHB1 is **J1** pin 5 (even pins GND); check `ADC_PAIR` matches the header pins used |
+| Both channels read ≈ −32768 or ≈ 0 with inputs applied | References not enabled / not settled | — | Check init ran (error LED off), 2.5 V on EVM REFIO test points, ±8 V op-amp supplies present |
+| No bus traffic at all; heartbeat LED dark | Tick timer never fires, or the firmware never got past init | — | Confirm the 32 kHz source, then halt with `mspdebug` and read `g_tick` |
 
 ---
 
@@ -477,7 +578,7 @@ CPU is awake ~1.5 % of the time.
   moves and samples data.
 - **DCO** — the MSP430's internal RC oscillator.
 - **eUSCI** — the MSP430's serial peripheral block; "A" instances do UART,
-  "B" instances do SPI/I²C.
+  "B" instances do SPI/I²C. Only eUSCI_B0 is used here.
 - **FRAM** — ferroelectric RAM; the FR5969's program memory.
 - **Gated / burst clock** — a clock that only toggles when needed and idles
   otherwise; what an SPI master emits.
@@ -498,11 +599,13 @@ CPU is awake ~1.5 % of the time.
   DACs and which reference feeds each channel's common mode.
 - **SAR** — successive-approximation register, the ADC's conversion
   method (binary search, one bit per clock).
+- **SEQFIFO** — the ADC register holding the automatic-mode channel
+  sequencer and FIFO. Unused here (manual selection, `M0 = 0`), left at its
+  reset default.
 - **SR (special read)** — config bit making one RD strobe deliver both
   converters' results.
 - **Two's complement** — signed binary encoding; 0x8000 = −32768,
   0x7FFF = +32767.
-- **UART** — asynchronous serial link; here 115200 baud to the PC.
 - **Watchdog (WDT)** — a timer that resets the chip unless periodically
   serviced; running by default on MSP430, so the first line of `main()`
   stops it.

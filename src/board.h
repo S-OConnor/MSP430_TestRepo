@@ -33,9 +33,18 @@
  *
  *  MCU clock tree (set up in clocks.c):
  *    MCLK  = 16 MHz  (DCO)         - CPU clock
- *    SMCLK =  8 MHz  (DCO / 2)     - feeds eUSCI SPI + UART bit clocks
+ *    SMCLK =  8 MHz  (DCO / 2)     - feeds the eUSCI SPI bit clock
  *    ACLK  = 32.768 kHz            - external square wave on LFXIN (bypass),
  *                                    feeds the 100 Hz sample-tick timer
+ *
+ *  Analog inputs (EVM headers, odd pins signal / even pins GND):
+ *
+ *    ADC channel  EVM header pin  buffered by
+ *    -----------  --------------  ------------------------------------------
+ *    CHA1         J2 pin 5        OPA4H014-SEP U2C  (needs OPA_V+/- on J3/J4)
+ *    CHB1         J1 pin 5        OPA4H014-SEP U1C
+ *
+ *  This firmware acquires exactly those two channels - see ADC_PAIR below.
  * =============================================================================
  */
 
@@ -47,6 +56,22 @@
  * strobe-width spec is written against a free-running clock), slow down here:
  * 2 -> 4 MHz, 4 -> 2 MHz. Nothing else needs to change. */
 #define ADC_SCLK_DIV        1u
+
+/* Which channel pair the ADC converts, 0..3.
+ *
+ * The part holds two converters (A and B) behind a 4:1 mux each, and one
+ * conversion digitizes pair k = CHAk + CHBk *simultaneously*. This build
+ * acquires a single pair per tick, so the mux selection is a constant:
+ * pair 1 = CHA1 (EVM J2.5) + CHB1 (EVM J1.5).
+ *
+ * Changing this constant is the only edit needed to move to another pair -
+ * it feeds the C field of the init CONFIG word, the C field of every
+ * per-conversion command, and which physical inputs you must wire up. */
+#define ADC_PAIR            1
+
+#if (ADC_PAIR < 0) || (ADC_PAIR > 3)
+#error "ADC_PAIR must be 0..3 (pair k = CHAk + CHBk)"
+#endif
 
 /* Sample-tick period in ACLK cycles. 32768 Hz / 328 = 99.902 Hz, the closest
  * exact fit to 100 Hz (32768 = 2^15, so no integer divider hits 100.000 Hz).
@@ -67,7 +92,7 @@
 /* CPU frequency, used by __delay_cycles() busy-waits (compile-time constant). */
 #define MCLK_HZ             16000000uL
 
-/* ---- status flags (reported in the boot banner / error LED) ------------ */
+/* ---- status flags (latched into g_status; any nonzero -> error LED) ---- */
 
 #define ST_NO_LFXT          0x01u   /* external 32 kHz never settled; ACLK is
                                      * on VLO and the tick runs from SMCLK   */

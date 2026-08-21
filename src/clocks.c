@@ -7,7 +7,7 @@
  * =============================================================================
  *  Target clock tree:
  *    MCLK  (CPU)        = DCO 16 MHz          (needs 1 FRAM wait state)
- *    SMCLK (peripherals)= DCO / 2 = 8 MHz     (SPI + UART bit clocks)
+ *    SMCLK (peripherals)= DCO / 2 = 8 MHz     (SPI bit clock)
  *    ACLK  (timer)      = LFXT bypass 32768 Hz (external square wave on PJ.4)
  * =============================================================================
  */
@@ -31,19 +31,21 @@ static void gpio_init(void)
      * function selector split across two registers (PxSEL1:PxSEL0); per the
      * FR5969 datasheet port tables the eUSCI functions live at SEL1=1,SEL0=0:
      *
-     *   SEL1 SEL0   function on P1.6/P1.7/P2.0/P2.1/P2.2
+     *   SEL1 SEL0   function on P1.6/P1.7/P2.2
      *    0    0     plain GPIO
-     *    1    0     UCB0SIMO / UCB0SOMI / UCA0TXD / UCA0RXD / UCB0CLK
+     *    1    0     UCB0SIMO / UCB0SOMI / UCB0CLK
      *
      * When a peripheral function is selected, the peripheral controls the
-     * pin direction automatically (PxDIR is ignored for that pin). */
+     * pin direction automatically (PxDIR is ignored for that pin).
+     *
+     * Only eUSCI_B0 is muxed out. P2.0/P2.1 reach the eZ-FET backchannel
+     * UART on the LaunchPad, but nothing drives them any more, so they stay
+     * plain outputs at 0 like every other unused pin. */
     P1SEL1 |= BIT6 | BIT7;                      /* P1.6 = UCB0SIMO (-> SDI)
                                                  * P1.7 = UCB0SOMI (<- SDOA)  */
     P1SEL0 &= (uint8_t)~(BIT6 | BIT7);          /* make sure SEL0 bits are 0  */
-    P2SEL1 |= BIT0 | BIT1 | BIT2;               /* P2.0 = UCA0TXD (backchannel)
-                                                 * P2.1 = UCA0RXD
-                                                 * P2.2 = UCB0CLK (-> CLOCK)  */
-    P2SEL0 &= (uint8_t)~(BIT0 | BIT1 | BIT2);
+    P2SEL1 |= BIT2;                             /* P2.2 = UCB0CLK (-> CLOCK)  */
+    P2SEL0 &= (uint8_t)~BIT2;
 
     /* ADC chip select: keep ~CS deasserted (high) until adc168_init() is
      * ready to talk. All other strobe outputs (CONVST P2.6, RD P4.2) idle at
@@ -106,7 +108,7 @@ uint8_t clock_init(void)
 
     /* Per-clock dividers:
      *   ACLK  /1 -> 32768 Hz
-     *   SMCLK /2 -> 8 MHz   (this is the SPI/UART reference)
+     *   SMCLK /2 -> 8 MHz   (this is the SPI reference)
      *   MCLK  /1 -> 16 MHz                                                   */
     CSCTL3 = DIVA__1 | DIVS__2 | DIVM__1;
 

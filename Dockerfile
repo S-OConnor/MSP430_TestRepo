@@ -1,4 +1,4 @@
-# Development image: TI msp430-gcc cross toolchain + CMake + flash/serial tools.
+# Development image: TI msp430-gcc cross toolchain + CMake + flashing tools.
 #
 #   docker build -t msp430-dev .
 #   docker run --rm -it -v "$PWD":/work msp430-dev
@@ -6,9 +6,9 @@
 #   cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/msp430-toolchain.cmake -G Ninja
 #   cmake --build build
 #
-# Flashing/serial from inside the container needs the LaunchPad passed through:
+# Flashing from inside the container needs the LaunchPad passed through:
 #   docker run --rm -it -v "$PWD":/work \
-#       --device=/dev/bus/usb --device=/dev/ttyACM0 --device=/dev/ttyACM1 \
+#       --device=/dev/bus/usb --device=/dev/ttyACM0 \
 #       msp430-dev
 
 FROM debian:bookworm-slim
@@ -16,7 +16,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl bzip2 unzip \
         make cmake ninja-build \
-        mspdebug picocom \
+        mspdebug \
     && rm -rf /var/lib/apt/lists/*
 
 ARG MSP430_GCC_VER=9.3.1.11
