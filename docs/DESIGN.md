@@ -503,6 +503,175 @@ The ADC's mode pin **M0 is strapped to ground on the EVM header** (J5.17,
 the ADC in "Mode II": manual channel selection through SDI, data on SDOA only
 *(ADC Table 6-5, p. 21)*.
 
+The same connections seen from the bench — which LaunchPad header pin goes to
+which EVM pin, plus the supplies, the analog inputs and the board mods — are in
+[§9.4](#94-wiring).
+
+### 9.4 Wiring
+
+[§9.3](#93-pin-map) lists the connections from the MCU's point of view — which
+port pin carries which signal. This section is the same information from the
+*bench's* point of view: what physically has to be connected between the two
+boards, the bench supplies and the signal sources, before any of the firmware
+below can run. Nothing here is done in software; it is all jumper wires,
+one solder strap, and two removed resistors.
+
+> **The two boards reuse each other's header names.** The LaunchPad's
+> BoosterPack headers are **J4** (left, BoosterPack pins 1–10) and **J5**
+> (right, pins 11–20); the EVM has **J5** for the digital bus, **J1/J2** for
+> the analog inputs and **J3/J4** for the op-amp rails. Throughout this
+> document a bare J-number is the **EVM's**; the LaunchPad's are always
+> written out as "LaunchPad J4" / "LaunchPad J5".
+
+#### The digital bus
+
+Seven signals plus a ground run between the boards. The LaunchPad brings its
+pins out on two BoosterPack headers — **J4** (left, BoosterPack pins 1–10) and
+**J5** (right, BoosterPack pins 11–20); which port pin lands on which
+BoosterPack pin is *(LaunchPad Figure 15, p. 21)*. On the EVM's J5, signals are
+on the odd pins and every even pin is ground *(EVM Figure 2-4, p. 6)*.
+
+```mermaid
+flowchart LR
+    subgraph LP["MSP-EXP430FR5969 LaunchPad"]
+        direction TB
+        LPJ4["header J4 (left)<br/>BoosterPack pins 1-10"]
+        LPJ5["header J5 (right)<br/>BoosterPack pins 11-20"]
+    end
+
+    subgraph EVM["ADC168M102REVM-PDK<br/>(PHI controller board removed)"]
+        direction TB
+        EJ5["header J5<br/>20-pin digital header<br/>odd = signal, even = GND"]
+        STRAP["strap 17 to 18<br/>M0 = 0 -> Mode II"]
+    end
+
+    LPJ4 -->|"CLOCK: P2.2 / BP7 -> 7"| EJ5
+    LPJ4 -->|"CONVST: P2.6 / BP3 -> 13"| EJ5
+    LPJ4 -->|"RD: P4.2 / BP2 -> 11"| EJ5
+    LPJ5 -->|"SDI: P1.6 / BP15 -> 15"| EJ5
+    LPJ5 -->|"~CS: P1.4 / BP12 -> 9"| EJ5
+    EJ5 -->|"SDOA: 1 -> P1.7 / BP14"| LPJ5
+    EJ5 -->|"BUSY: 5 -> P1.5 / BP13"| LPJ5
+    LPJ5 ---|"GND: BP20 to any even pin (use 2+)"| EJ5
+    EJ5 --- STRAP
+
+    SCOPE["scope / logic analyzer<br/>clips onto the same J5 pins"]
+    EJ5 -.->|"SDOA, CONVST, CLOCK, BUSY"| SCOPE
+```
+
+| Signal | Dir | LaunchPad pin | LaunchPad header | EVM J5 pin |
+|---|---|---|---|---|
+| CLOCK | → | P2.2 (UCB0CLK) | J4, BoosterPack 7 | 7 |
+| SDI | → | P1.6 (UCB0SIMO) | J5, BoosterPack 15 | 15 |
+| SDOA | ← | P1.7 (UCB0SOMI) | J5, BoosterPack 14 | 1 |
+| ~CS | → | P1.4 | J5, BoosterPack 12 | 9 |
+| CONVST | → | P2.6 | J4, BoosterPack 3 | 13 |
+| RD | → | P4.2 | J4, BoosterPack 2 | 11 |
+| BUSY | ← | P1.5 | J5, BoosterPack 13 | 5 |
+| DGND | — | GND | J5, BoosterPack 20 | any even pin — **run at least two** |
+
+Three more J5 pins are settled on the EVM itself rather than wired across:
+
+| EVM J5 pin | Signal | What to do |
+|---|---|---|
+| 17 | M0 | **Strap to pin 18 (GND).** With M1 pulled high on the EVM this selects Mode II *(ADC Table 6-5, p. 21)* |
+| 19 | M1 | Leave open — the EVM already pulls it high |
+| 3 | SDOB | Leave open — Mode II never drives it |
+
+Each of those bus signals reaches J5 through a 49.9 Ω series resistor on the
+EVM *(EVM Figure 2-4, p. 6)*, which helps at 8 MHz but does not rescue long
+unshielded jumpers:
+keep the wires short (≲10 cm), keep CLOCK away from SDOA, and use both ground
+returns. If frames still come back corrupted, slow the bus down with
+`ADC_SCLK_DIV` in `board.h` rather than chasing layout ([§16](#16-what-can-go-wrong-and-how-the-firmware-reacts)).
+
+#### Power, analog inputs and the timebase
+
+The PHI controller board that normally sits on the EVM **must be removed** — it
+drives the same digital lines the LaunchPad now drives, and two masters on one
+bus is a contention fault, not a race. Removing it also takes away the EVM's
+supplies, so DVDD and AVDD have to be fed by hand: remove **R19** and feed DVDD
+at **TP3**, remove **R34** and feed AVDD at **TP2** *(EVM §2.1, p. 4)*.
+
+```mermaid
+flowchart LR
+    USB["USB host<br/>LaunchPad power + mspdebug flash"]
+    FG["function generator<br/>32.768 kHz square wave, 0-3.3 V"]
+    P5["bench supply<br/>+5 V"]
+    PB["bench supply<br/>+8 V / -8 V"]
+    AIN["2 signal sources<br/>0..5 V"]
+
+    subgraph LPP["MSP-EXP430FR5969 LaunchPad"]
+        V33["3V3 pin<br/>J4 / BoosterPack 1"]
+        Y4["Y4 crystal pad = PJ.4 / LFXIN<br/>not brought out to any header"]
+    end
+
+    subgraph EVMP["ADC168M102REVM-PDK"]
+        TP3["TP3 = DVDD 3.3 V<br/>(R19 removed)"]
+        TP2["TP2 = AVDD 5 V<br/>(R34 removed)"]
+        J34["J3 / J4<br/>pin 3 = OPA_V+<br/>pin 1 = OPA_V-"]
+        J2H["J2 pin 5 = CHA1"]
+        J1H["J1 pin 5 = CHB1"]
+    end
+
+    USB --> LPP
+    V33 -->|"3.3 V"| TP3
+    P5 -->|"5 V"| TP2
+    PB -->|"+8 V / -8 V"| J34
+    AIN --> J2H
+    AIN --> J1H
+    FG -->|"solder at the pad;<br/>remove Y4 first"| Y4
+
+    GND(["common ground: both boards,<br/>all three supplies,<br/>the generator and the scope"])
+    LPP --- GND
+    EVMP --- GND
+    P5 --- GND
+    PB --- GND
+    FG --- GND
+```
+
+| Rail | From | To | Limits *(EVM Table 1-1, p. 3)* |
+|---|---|---|---|
+| DVDD 3.3 V | LaunchPad 3V3 (J4, BoosterPack 1) | EVM **TP3**, R19 removed | 2.3–5.5 V |
+| AVDD 5 V | external bench supply | EVM **TP2**, R34 removed | 2.7–5.5 V; 3.3 V is fine for digital bring-up, at reduced input range |
+| OPA_V+ ≈ +8 V | external bipolar supply | EVM **J3[3]** and **J4[3]** | 6 V ≤ OPA_V+ ≤ 10 V |
+| OPA_V− ≈ −8 V | external bipolar supply | EVM **J3[1]** and **J4[1]** | −10 V ≤ OPA_V− ≤ 0.35 V |
+
+The ±8 V rails only feed the OPA4H014-SEP input buffers. Digital bring-up — the
+CONFIG readback, the frame checks, the tick rate — works without them; they are
+required before any *analog* reading means anything.
+
+Analog inputs go onto the EVM's own op-amp headers, not through the LaunchPad
+at all (odd pins signal, even pins ground) *(EVM §2.2 and Figure 2-3, p. 5)*:
+
+| ADC channel | EVM header pin | Appears on SDOA as |
+|---|---|---|
+| CHA1 | **J2 pin 5** | frame A — first 20 clocks of the readout |
+| CHB1 | **J1 pin 5** | frame B — second 20 clocks |
+
+The other six channel inputs (J2.1/3/7, J1.1/3/7) stay open, and jumpers
+**JP1/JP2 stay in their default `CMx_EXT` position** — the common mode comes
+from the ADC's internal reference over the bus, set by firmware in
+[§10.2](#102-the-initialization-sequence-adc168_init), so no jumper move is needed.
+
+The 32.768 kHz timebase is the one connection with nowhere convenient to land:
+**PJ.4/LFXIN is not brought out to any LaunchPad header** — it goes only to the
+onboard crystal **Y4** *(LaunchPad §2.2.2, p. 8, and Schematic 1, p. 37)*. Feed
+the external square wave at the Y4 pad, and ideally remove Y4 first so the
+crystal is not fighting the generator. If that wire is missing or wrong the
+firmware does not hang: it falls back to the DCO-derived 100 Hz tick and raises
+`ST_NO_LFXT` ([§12](#12-timing-the-100-hz-tick)).
+
+#### Pre-power checklist
+
+1. PHI controller board unplugged from the EVM.
+2. R19 and R34 removed; TP3 and TP2 wired to 3.3 V and 5 V.
+3. EVM J5 pin 17 strapped to pin 18 (M0 = 0).
+4. Seven signal wires plus **two** ground wires between the boards.
+5. JP1/JP2 in `CMx_EXT` (default — leave them alone).
+6. Every ground tied together: both boards, all three supplies, generator, scope.
+7. ±8 V present if you intend to read real analog values.
+
 ---
 
 ## 10. Talking to the ADC, step by step
@@ -1036,9 +1205,10 @@ designators are its own — so those come from the two user's guides.
 
 | Doc | Page | Section / figure | What it establishes | Used in |
 |---|---|---|---|---|
-| EVM | 3 | Table 1-1, supply requirements | DVDD 2.3–5.5 V, AVDD 2.7–5.5 V, OPA_V+ 6–10 V on J3[3]/J4[3], OPA_V− −10–0.35 V on J3[1]/J4[1] | [§9.3](#93-pin-map), [§16.2](#162-the-detail-behind-each-leaf) |
-| EVM | 4 | §2.1, power circuit | Remove R19 → feed DVDD at TP3; remove R34 → feed AVDD at TP2 | [§16.2](#162-the-detail-behind-each-leaf) |
-| EVM | 5 | §2.2 + Figure 2-3, analog inputs | J2 = channel A, J1 = channel B; **J2 pin 5 = CHA1, J1 pin 5 = CHB1**; JP1/JP2 default to `CMx_EXT` | [§9.3](#93-pin-map), [§10.2](#102-the-initialization-sequence-adc168_init), [§16.2](#162-the-detail-behind-each-leaf) |
-| EVM | 6 | §2.3 + Figure 2-4, ADC circuit | The whole J5 pinout (SDOA 1, BUSY 5, CLK 7, ~CS 9, RD 11, CONVST 13, SDI 15, M0 17, M1 19); 22 µF on REFIO1/REFIO2; J5 is meant for scope/logic-analyzer probing and an external controller | [§9.3](#93-pin-map), [§10.2](#102-the-initialization-sequence-adc168_init), [§14](#14-getting-at-the-data-the-scope), [§16](#16-what-can-go-wrong-and-how-the-firmware-reacts) |
-| LP | 8 | §2.2.2, Clocking | **Y4 is the populated 32 kHz crystal**; Y1 is an unpopulated 4–24 MHz HF footprint | [§16.2](#162-the-detail-behind-each-leaf) |
-| LP | 37 | Schematic | LED1 on P1.0, LED2 on P4.6; Y4 across PJ.4/PJ.5 | [§14](#14-getting-at-the-data-the-scope) |
+| EVM | 3 | Table 1-1, supply requirements | DVDD 2.3–5.5 V, AVDD 2.7–5.5 V, OPA_V+ 6–10 V on J3[3]/J4[3], OPA_V− −10–0.35 V on J3[1]/J4[1] | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
+| EVM | 4 | §2.1, power circuit | Remove R19 → feed DVDD at TP3; remove R34 → feed AVDD at TP2 | [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
+| EVM | 5 | §2.2 + Figure 2-3, analog inputs | J2 = channel A, J1 = channel B; **J2 pin 5 = CHA1, J1 pin 5 = CHB1**; JP1/JP2 default to `CMx_EXT` | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§16.2](#162-the-detail-behind-each-leaf) |
+| EVM | 6 | §2.3 + Figure 2-4, ADC circuit | The whole J5 pinout (SDOA 1, BUSY 5, CLK 7, ~CS 9, RD 11, CONVST 13, SDI 15, M0 17, M1 19); 22 µF on REFIO1/REFIO2; J5 is meant for scope/logic-analyzer probing and an external controller | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§14](#14-getting-at-the-data-the-scope), [§16](#16-what-can-go-wrong-and-how-the-firmware-reacts) |
+| LP | 8 | §2.2.2, Clocking | **Y4 is the populated 32 kHz crystal**; Y1 is an unpopulated 4–24 MHz HF footprint | [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
+| LP | 21 | Figure 15, BoosterPack connector pinout | Which BoosterPack pin each port pin lands on: J4 = pins 1–10 (3V3 1, P4.2 2, P2.6 3, P2.2 7), J5 = pins 11–20 (P1.4 12, P1.5 13, P1.7 14, P1.6 15, GND 20) | [§9.4](#94-wiring) |
+| LP | 37 | Schematic | LED1 on P1.0, LED2 on P4.6; Y4 across PJ.4/PJ.5 | [§9.4](#94-wiring), [§14](#14-getting-at-the-data-the-scope) |
