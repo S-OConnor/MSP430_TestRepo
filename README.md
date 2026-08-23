@@ -95,8 +95,9 @@ comes from the ADC's internal reference via the REFCM register, in firmware.
 ### 32.768 kHz timebase
 
 An external 32.768 kHz **square wave (0–3.3 V)** feeds LFXIN (PJ.4) in bypass
-mode. On the LaunchPad, PJ.4 carries the onboard crystal Y1 and is not on a
-header — attach at the crystal pad and ideally remove Y1. Sample rate is
+mode. On the LaunchPad, PJ.4 carries the onboard 32 kHz crystal **Y4** and is
+not on a header — attach at the crystal pad and ideally remove Y4 (SLAU535B
+§2.2.2, p. 8; Y1 is the *unpopulated* 4–24 MHz HF footprint). Sample rate is
 32768/328 = **99.902 Hz**. If the source is missing, the firmware reports it
 (status bit 0x01, error LED) and falls back to a DCO-derived 100 Hz tick so
 streaming continues.

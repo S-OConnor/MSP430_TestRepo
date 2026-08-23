@@ -34,7 +34,7 @@ Analog inputs (EVM op-amp headers, odd pins signal / even pins GND): **CHA1 = J2
 
 EVM power (PHI controller **removed** — it would contend on the digital lines): DVDD 3.3 V = LaunchPad 3V3 → TP3 (remove R19); AVDD 5 V external → TP2 (remove R34); ±8 V on J3/J4 for input op-amps (needed for real analog readings, not digital bring-up); JP1/JP2 stay default (common mode comes from the internal reference via REFCM — firmware only). Common ground everywhere.
 
-32.768 kHz source: PJ.4/LFXIN carries onboard crystal Y1 and isn't on a header — attach at the crystal pad, ideally remove Y1; 0–3.3 V swing. (Fallback: feed a TAxCLK header pin instead — small isolated change.)
+32.768 kHz source: PJ.4/LFXIN carries the onboard 32 kHz crystal **Y4** and isn't on a header — attach at the crystal pad, ideally remove Y4 (SLAU535B §2.2.2 p.8; Y1 is the unpopulated 4–24 MHz HF footprint); 0–3.3 V swing. (Fallback: feed a TAxCLK header pin instead — small isolated change.)
 
 ## ADC operating configuration (fixed facts, encode in `adc168m102.h`)
 

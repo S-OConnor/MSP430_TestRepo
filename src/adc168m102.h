@@ -18,15 +18,81 @@
 
 /* Control words (CONFIG bits: C[15:14] R[13:12] PD[11:10] FE9 SR8 FC7 PDE6
  * CID5 CE4 A[3:0]). ADC168_W_CONFIG_BASE has C=00; the driver ORs in
- * ADC_PAIR so the very first conversion already uses the wanted mux position. */
-#define ADC168_W_RESET        0x0004u  /* A=0100: software reset               */
-#define ADC168_W_CONFIG_BASE  0x1140u  /* R=01 full update, SR=1, PDE=1, CID=0 */
-#define ADC168_W_LINKCHK      0x1041u  /* R=01, PDE=1, A=0001 read-CONFIG      */
-#define ADC168_W_PTR_REFDAC1  0x1142u  /* CONFIG + A=x010: next word -> REFDAC1 */
-#define ADC168_W_PTR_REFDAC2  0x1145u  /* CONFIG + A=x101: next word -> REFDAC2 */
-#define ADC168_W_PTR_REFCM    0x114Cu  /* CONFIG + A=1100: next word -> REFCM   */
-#define ADC168_W_REFDAC_2V5   0x03FFu  /* RPD=0 (enabled), code 0x3FF = 2.5 V  */
-#define ADC168_W_REFCM_INT    0xFF00u  /* CMxx=1 (internal CM) x8, Rxx=0 = REFIO1 */
+ * ADC_PAIR so the very first conversion already uses the wanted mux position.
+ * Each constant is prefaced by its 16-bit value in binary, MSB first, split
+ * into its register fields with a name ruler above it. The last two words are
+ * not CONFIG writes and use their own layouts (ADC Table 7-1): REFDACx is
+ * Reserved[15:11] RPD D[9:0], REFCM is CMB[15:12] CMA[11:8] RB[7:4] RA[3:0]. */
+
+// Software reset — the first word adc168_init() sends once ~CS is low.
+// A=0100 returns every register to its power-up default and aborts any
+// conversion in flight, so bring-up starts from a known state whatever ran
+// before (a warm restart, a debugger halt mid-stream).
+// C  R  PD FE SR FC PDE CID CE A
+// 00 00 00 0  0  0  0   0   0  0100
+#define ADC168_W_RESET        0x0004u
+
+// The operating configuration, minus the channel. adc168m102.c ORs ADC_PAIR
+// into C[15:14] to build ADC168_W_CONFIG (0x5140 for pair 1) and writes that
+// once at init; the mode bits never change afterwards. R=01 rewrites the
+// whole register, SR=1 makes one RD strobe deliver both converters' results,
+// PDE=1 selects the pseudo-differential 4:1 mux, CID=0 keeps the indicator
+// bits the frame validator checks. C=00 here is only a placeholder — this
+// constant is never written as-is.
+// C  R  PD FE SR FC PDE CID CE A
+// 00 01 00 0  1  0  1   0   0  0000
+#define ADC168_W_CONFIG_BASE  0x1140u
+
+// Link check, written before the real configuration so a wiring or clock-
+// phase fault is caught before it can be mistaken for bad data. A=0001 tells
+// the ADC to present CONFIG on SDOA at the next read access; init compares
+// bits 11:4 of the reply against the PDE=1 it just wrote and sets
+// ST_ADC_NOLINK on a mismatch, which is what a stuck SDOA (all 0s or all 1s)
+// produces. SR is still 0 here, so the reply is the simple single-frame
+// kind.
+// C  R  PD FE SR FC PDE CID CE A
+// 00 01 00 0  0  0  1   0   0  0001
+#define ADC168_W_LINKCHK      0x1041u
+
+// Address word for REFDAC1. Registers other than CONFIG have no address
+// byte: you write CONFIG carrying an action code and the FOLLOWING word
+// lands in the target register. A=x010 aims the next write at REFDAC1, whose
+// payload is ADC168_W_REFDAC_2V5. The mode bits match ADC168_W_CONFIG_BASE
+// so steering a write cannot disturb the configuration.
+// C  R  PD FE SR FC PDE CID CE A
+// 00 01 00 0  1  0  1   0   0  0010
+#define ADC168_W_PTR_REFDAC1  0x1142u
+
+// Address word for REFDAC2 — same two-step pattern as ADC168_W_PTR_REFDAC1,
+// with A=x101 selecting the second reference DAC.
+// C  R  PD FE SR FC PDE CID CE A
+// 00 01 00 0  1  0  1   0   0  0101
+#define ADC168_W_PTR_REFDAC2  0x1145u
+
+// Address word for REFCM (A=1100), steering the next write to the common-
+// mode routing register. Payload is ADC168_W_REFCM_INT.
+// C  R  PD FE SR FC PDE CID CE A
+// 00 01 00 0  1  0  1   0   0  1100
+#define ADC168_W_PTR_REFCM    0x114Cu
+
+// Payload written into both reference DACs. They come out of reset DISABLED
+// (REFDACx default 0x07FF has the power-down bit set), so this word does two
+// jobs: RPD=0 powers the DAC up, and full-scale code 0x3FF sets its output
+// to 2.5 V on REFIO1/REFIO2. Sent twice, once after each PTR_REFDACx word,
+// then given t_REFON = 8 ms to settle into the EVM's 22 uF reference caps.
+// Reserved RPD D
+// 00000    0   1111111111
+#define ADC168_W_REFDAC_2V5   0x03FFu
+
+// Payload for REFCM: routes the now-2.5 V internal reference as the pseudo-
+// differential negative input for all eight channels. CMxx=1 picks the
+// internal common mode over the external CMA/CMB pins; Rxx=0 picks REFIO1
+// over REFIO2. Only the ADC_PAIR channels are ever read, but arming all
+// eight bits costs nothing and keeps ADC_PAIR a one-line change. Every
+// channel then spans 2.5 V +- 2.5 V with no EVM jumper changes.
+// CMB  CMA  RB   RA
+// 1111 1111 0000 0000
+#define ADC168_W_REFCM_INT    0xFF00u
 
 typedef enum {
     ADC168_OK = 0,
