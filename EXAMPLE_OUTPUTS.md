@@ -166,7 +166,7 @@ LED when it fails.
 | Pressed a button, nothing changed | The press was not seen: wrong pin, pull-up not enabled, or `LOCKLPM5` still set. | `g_phase` stays 0; check the `P4REN`/`P1REN` setup in [src/clocks.c](src/clocks.c) |
 | Error LED lights while idle, `g_err_cfg` climbing | The link was fine at init and broke afterwards — a wire pulled loose, EVM power lost. | `g_cfg` holds the latest raw readback; check J5 wiring and EVM supplies |
 | Heartbeat LED dark, no bus traffic | The tick never runs — firmware stuck before `timer_init()`, or the timer never fires. | Halt with `mspdebug`, read `g_tick` and `g_status` |
-| Error LED on from power-up, `g_status = 0x0001` | External 32 kHz never settled; the tick fell back to the DCO-derived 100 Hz. Bus traffic continues, timebase accuracy drops to ~±2 %. | LFXIN square wave at PJ.4 / crystal Y1 |
+| Error LED on from power-up, `g_status = 0x0001` | The 32.768 kHz crystal never started within the ~1 s window; the tick fell back to the DCO-derived 100 Hz. Bus traffic continues, timebase accuracy drops to ~±2 %. | LaunchPad crystal **Y4** on PJ.4/PJ.5 |
 | Error LED on, `g_status = 0x0002`, `g_cfg = 0x0000` | Link check failed with SDOA stuck low — nothing is driving the line. | ~CS wiring, EVM DVDD, PHI controller board still fitted |
 | Error LED on, `g_status = 0x0002`, `g_cfg = 0xFFFF` | Link check failed with SDOA stuck high. | SDOA wiring / pull-up, EVM power |
 | Error LED on, `g_cfg = 0x1040`-ish | The link works but a mode bit came back wrong — usually the M0 strap. | J5.17 → GND strap (M1 stays pulled high) |

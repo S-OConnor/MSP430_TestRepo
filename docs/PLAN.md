@@ -9,7 +9,7 @@ The ADC is **not a plain SPI peripheral**: CLOCK is both conversion and serial c
 Agreed decisions:
 - **Channels: CHA1 + CHB1** (`ADC_PAIR = 1`). The two converters share a mux position, so one conversion captures both simultaneously and one 40-clock readout returns both — a tick is a single ADC access (~20 µs). Analog inputs land on EVM **J2 pin 5** (CHA1) and **J1 pin 5** (CHB1).
 - **SPI SCLK = 8 MHz** (10 MHz not synthesizable from the FR5969 DCO; ADC allows 20 MHz).
-- **Timebase**: external 32.768 kHz square wave into LFXIN (LFXT **bypass**) → ACLK.
+- **Timebase**: the LaunchPad's onboard 32.768 kHz crystal **Y4** on LFXIN/LFXOUT (LFXT **crystal mode**) → ACLK. Nothing external, nothing to wire.
 - **Rate**: Timer_A0 up mode on ACLK, CCR0=327 (period 328) → **99.902 Hz** (closest exact fit to 100 Hz; 2^15 has only power-of-2 divisors). 320→102.4 Hz is a one-constant alternative.
 - **Readout**: none from the MCU. SDOA carries both 16-bit results every tick; a scope/logic analyzer on the bus is the measurement instrument, triggered on CONVST. Health is reported on the two LaunchPad LEDs, detail via `volatile` globals read with mspdebug.
 - **Start of acquisition** *(amendment, post-Phase 6, per user)*: the firmware does not stream out of reset. It boots into an **idle phase** that repeats the Phase 4 link check — write `CONFIG = 0x1041`, read it back — once a second (`IDLE_CONFIG_TICKS = 100` ticks) and polls the LaunchPad buttons every tick; pressing **S1 (P4.5)** or **S2 (P1.1)** writes the operating word `0x5140`, flushes two conversions, and switches to the Phase 6 streaming loop for good (reset returns to idle). Buttons are polled on the existing tick with a 2-poll debounce (`BTN_DEBOUNCE_POLLS`), internal pull-ups, active low — no port ISR. The heartbeat LED doubles from a 0.5 Hz to a 1 Hz blink at the hand-over. New observables: `g_phase`, `g_cfg_cycles`, `g_err_cfg`. Rationale: the idle phase proves the digital link at a watchable rate while the analog side is still being wired or probed, and nothing converts into a half-built setup. **Note the correction it forced:** LED1 (red) is on **P4.6** and LED2 (green) on **P1.0** — the reverse of the naming used in the earlier phases (SLAU535B schematic p. 37); the pins the firmware drives are unchanged, only their names/colours.
@@ -35,7 +35,7 @@ Analog inputs (EVM op-amp headers, odd pins signal / even pins GND): **CHA1 = J2
 
 EVM power (PHI controller **removed** — it would contend on the digital lines): DVDD 3.3 V = LaunchPad 3V3 → TP3 (remove R19); AVDD 5 V external → TP2 (remove R34); ±8 V on J3/J4 for input op-amps (needed for real analog readings, not digital bring-up); JP1/JP2 stay default (common mode comes from the internal reference via REFCM — firmware only). Common ground everywhere.
 
-32.768 kHz source: PJ.4/LFXIN carries the onboard 32 kHz crystal **Y4** and isn't on a header — attach at the crystal pad, ideally remove Y4 (SLAU535B §2.2.2 p.8; Y1 is the unpopulated 4–24 MHz HF footprint); 0–3.3 V swing. (Fallback: feed a TAxCLK header pin instead — small isolated change.)
+32.768 kHz timebase: **no wiring** — PJ.4/PJ.5 (LFXIN/LFXOUT) carry the LaunchPad's own 32 kHz crystal **Y4** and reach no header (SLAU535B §2.2.2 p.8; Y1 is the unpopulated 4–24 MHz HF footprint). Leave Y4 fitted. Drive level `LFXTDRIVE_2` matches its 7 pF load (SLAS704G Table 5-4 p.26; LP schematic p.37).
 
 ## ADC operating configuration (fixed facts, encode in `adc168m102.h`)
 
@@ -67,7 +67,7 @@ msp430/
 └── src/
     ├── board.h                # pin map macros, tunables (ADC_PAIR, ADC_SCLK_DIV, tick period)
     ├── main.c                 # phase state machine, tick loop, ISRs, buttons, observable globals, LEDs
-    ├── clocks.c/.h            # clock_init(): LFXT bypass + fault fallback
+    ├── clocks.c/.h            # clock_init(): LFXT crystal + fault fallback
     ├── spi.c/.h               # eUSCI_B0 master, spi_xfer()
     └── adc168m102.c/.h        # ADC driver
 ```
@@ -86,8 +86,8 @@ Each phase is independently flashable and verified before the next begins; ADC h
 
 ## Phase 1 — Board bring-up: GPIO + clocks (`board.h`, `clocks.c`)
 
-**Work**: WDT stop; full GPIO map (eUSCI pins **SEL1=1/SEL0=0**: `P1SEL1|=BIT6|BIT7`, `P2SEL1|=BIT0|BIT1|BIT2`; P1.5 input+pulldown; P1.4/P2.6/P4.2 outputs idle per table; LEDs P1.0/P4.6); `PM5CTL0 &= ~LOCKLPM5`; `FRCTL0 = FRCTLPW|NWAITS_1` **before** DCO→16 MHz (`CSCTL1 = DCOFSEL_4|DCORSEL`); `PJSEL0|=BIT4`; `CSCTL2 = SELA__LFXTCLK|SELS__DCOCLK|SELM__DCOCLK`; `CSCTL3 = DIVA__1|DIVS__2|DIVM__1` (SMCLK 8 MHz); `CSCTL4 = LFXTBYPASS`; bounded LFXTOFFG/OFIFG fault-clear loop → on persistent fault: ACLK=VLO + `ST_NO_LFXT` flag (no hang). Blink P1.0 from a software delay, then from an ACLK-driven timer.
-**Exit criteria**: LED blinks at the expected period with the 32 kHz source attached (proves LFXT path); detaching the source flips to the fallback flag instead of hanging.
+**Work**: WDT stop; full GPIO map (eUSCI pins **SEL1=1/SEL0=0**: `P1SEL1|=BIT6|BIT7`, `P2SEL1|=BIT0|BIT1|BIT2`; P1.5 input+pulldown; P1.4/P2.6/P4.2 outputs idle per table; LEDs P1.0/P4.6); `PM5CTL0 &= ~LOCKLPM5`; `FRCTL0 = FRCTLPW|NWAITS_1` **before** DCO→16 MHz (`CSCTL1 = DCOFSEL_4|DCORSEL`); `PJSEL0|=BIT4|BIT5` (crystal mode drives LFXOUT too); `CSCTL2 = SELA__LFXTCLK|SELS__DCOCLK|SELM__DCOCLK`; `CSCTL3 = DIVA__1|DIVS__2|DIVM__1` (SMCLK 8 MHz); `CSCTL4 = LFXTDRIVE_2|HFXTOFF`; LFXTOFFG/OFIFG fault-clear loop with a **10 ms delay per pass over a ~1 s window** (`LFXT_SETTLE_TRIES`) — a watch crystal needs hundreds of ms to start, so a tight spin would fail every cold boot — → on persistent fault: ACLK=VLO + `ST_NO_LFXT` flag (no hang). Blink P1.0 from a software delay, then from an ACLK-driven timer.
+**Exit criteria**: LED blinks at the expected period on a board with Y4 fitted (proves the LFXT path), and `g_status` reads 0x00 after a cold boot — i.e. the start-up window is long enough.
 
 ## Phase 2 — Sample tick (`main.c` skeleton)
 
@@ -134,4 +134,4 @@ Each phase is independently flashable and verified before the next begins; ADC h
 - **B. Channel-rotation phase** (C word pipelined) → **retired** by the 2-channel design: C is a compile-time constant re-asserted on every access, so there is no rotation to fall out of phase. Init's `C = ADC_PAIR` plus the two discards prime it; a corrupted command word costs at most one sample. Phase 6's DC test still confirms the pair and the A/B ordering.
 - **C. Register activation under gated clock** → 3rd dummy byte in every write; confirmed by Phase 4 link-check + REFIO voltage.
 - **D. f_DATA min 25 kSPS deviation** → Phase 7 watch item; dummy conversion per tick if needed.
-- **E. LFXT absent/flaky** → bounded fault loop + VLO/SMCLK fallback keeps streaming with status flag; never hangs.
+- **E. LFXT slow to start / crystal damaged** → ~1 s fault-clear window covers normal crystal start-up; past it, VLO/SMCLK fallback keeps streaming with a status flag; never hangs.

@@ -8,7 +8,8 @@
  *  Target clock tree:
  *    MCLK  (CPU)        = DCO 16 MHz          (needs 1 FRAM wait state)
  *    SMCLK (peripherals)= DCO / 2 = 8 MHz     (SPI bit clock)
- *    ACLK  (timer)      = LFXT bypass 32768 Hz (external square wave on PJ.4)
+ *    ACLK  (timer)      = LFXT crystal 32768 Hz (LaunchPad crystal Y4 on
+ *                         PJ.4/PJ.5)
  * =============================================================================
  */
 
@@ -79,12 +80,16 @@ static void gpio_init(void)
     P1REN |= BIT1;
     P1OUT |= BIT1;
 
-    /* LFXIN (PJ.4): select the crystal-oscillator function so the external
-     * 32.768 kHz square wave reaches the clock system. Function select for
-     * the LFX pins is PJSEL1=0, PJSEL0=1 (bypass vs crystal mode is chosen
-     * later via the LFXTBYPASS bit in CSCTL4, not here). */
-    PJSEL0 |= BIT4;
-    PJSEL1 &= (uint8_t)~BIT4;
+    /* LFXIN (PJ.4) and LFXOUT (PJ.5): hand both pins to the low-frequency
+     * crystal oscillator. On the LaunchPad those two pins carry the board's
+     * own 32.768 kHz crystal Y4 (LP guide §2.2.2, p. 8; schematic p. 37),
+     * which is the sample timebase - nothing is wired to them.
+     *
+     * Crystal mode uses BOTH pins (the oscillator drives LFXOUT and senses
+     * LFXIN), so both select bits are set here; function select for the LFX
+     * pins is PJSEL1=0, PJSEL0=1. */
+    PJSEL0 |= BIT4 | BIT5;
+    PJSEL1 &= (uint8_t)~(BIT4 | BIT5);
 }
 
 uint8_t clock_init(void)
@@ -118,7 +123,7 @@ uint8_t clock_init(void)
     CSCTL1 = DCOFSEL_4 | DCORSEL;
 
     /* Clock-source multiplexers, one field per system clock:
-     *   SELA__LFXTCLK -> ACLK  from the LFXT pin (our external 32 kHz)
+     *   SELA__LFXTCLK -> ACLK  from LFXT (the onboard 32.768 kHz crystal)
      *   SELS__DCOCLK  -> SMCLK from the DCO
      *   SELM__DCOCLK  -> MCLK  from the DCO                                 */
     CSCTL2 = SELA__LFXTCLK | SELS__DCOCLK | SELM__DCOCLK;
@@ -130,34 +135,46 @@ uint8_t clock_init(void)
     CSCTL3 = DIVA__1 | DIVS__2 | DIVM__1;
 
     /* Oscillator control:
-     *   LFXTBYPASS = 1 : LFXIN accepts an external digital clock instead of
-     *                    driving a crystal (our case: 32.768 kHz square wave).
-     *   LFXTOFF    = 0 : (implicit, bit not set) LFXT input path enabled.
+     *   LFXTDRIVE_2    : oscillator drive level. The data sheet brackets the
+     *                    four settings by effective load capacitance (MCU
+     *                    Table 5-4, p. 26): {2} covers 6..9 pF, and the
+     *                    LaunchPad's Y4 is a 7 pF crystal (LP schematic,
+     *                    p. 37), so {2} is the matched setting.
+     *   LFXTBYPASS = 0 : (implicit, bit not set) crystal mode — the on-chip
+     *                    oscillator drives Y4.
+     *   LFXTOFF    = 0 : (implicit, bit not set) LFXT enabled.
      *   HFXTOFF    = 1 : keep the unused high-frequency crystal input OFF —
      *                    if HFXT were enabled with nothing attached its fault
      *                    flag would latch the global OFIFG forever.          */
-    CSCTL4 = LFXTBYPASS | HFXTOFF;
+    CSCTL4 = LFXTDRIVE_2 | HFXTOFF;
 
-    /* Oscillator-fault handshake: LFXTOFFG (in CSCTL5) latches whenever the
-     * LFXT input is absent/unstable, and it feeds the global oscillator-fault
+    /* Oscillator-fault handshake: LFXTOFFG (in CSCTL5) latches whenever LFXT
+     * is not oscillating cleanly, and it feeds the global oscillator-fault
      * flag OFIFG (in SFRIFG1). While a fault is latched, ACLK is internally
-     * substituted from a fallback source. The standard bring-up idiom is:
-     * clear both flags, and if the source really is stable they STAY cleared;
-     * if not, they immediately re-latch and we try again.
+     * substituted from a fallback source. The bring-up idiom is: clear both
+     * flags, wait, re-test — if the crystal is running they STAY cleared; if
+     * not, they re-latch and we go round again.
      *
-     * The loop is bounded so a missing oscillator cannot hang the boot. */
+     * A 32 kHz crystal is SLOW to start: it needs hundreds of milliseconds to
+     * reach amplitude, and until it does LFXTOFFG re-latches as fast as this
+     * loop can clear it. Hence a real 10 ms delay per pass — a tight spin
+     * would give up on every healthy cold boot. Worst case the whole window
+     * is LFXT_SETTLE_TRIES x 10 ms (~1 s), and only then does the firmware
+     * declare the crystal dead: bounded, so it can never hang the boot. */
     {
-        uint16_t tries = 50000u;
+        uint16_t tries = LFXT_SETTLE_TRIES;
         do {
             CSCTL5 &= ~(LFXTOFFG | HFXTOFFG);   /* clear the sticky faults    */
             SFRIFG1 &= ~OFIFG;                  /* clear the summary flag     */
-        } while ((SFRIFG1 & OFIFG) && --tries); /* re-latched? -> not stable  */
+            __delay_cycles(MCLK_HZ / 100uL);    /* 10 ms at 16 MHz MCLK       */
+        } while ((SFRIFG1 & OFIFG) && --tries); /* re-latched? -> not up yet  */
 
         if (tries == 0u) {
-            /* External 32 kHz never settled. Re-route ACLK to the internal
-             * VLO (~9.4 kHz, very inaccurate — we don't time from it; the
-             * tick timer will use SMCLK instead, see timer_init()), clear
-             * the now-expected faults once more, and report the condition. */
+            /* The crystal never started — Y4 missing, damaged, or its pads
+             * lifted by rework. Re-route ACLK to the internal VLO (~9.4 kHz,
+             * very inaccurate — we don't time from it; the tick timer will
+             * use SMCLK instead, see timer_init()), clear the now-expected
+             * faults once more, and report the condition. */
             CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
             CSCTL5 &= ~(LFXTOFFG | HFXTOFFG);
             SFRIFG1 &= ~OFIFG;

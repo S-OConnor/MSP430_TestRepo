@@ -122,12 +122,12 @@ comes from the ADC's internal reference via the REFCM register, in firmware.
 
 ### 32.768 kHz timebase
 
-An external 32.768 kHz **square wave (0–3.3 V)** feeds LFXIN (PJ.4) in bypass
-mode. On the LaunchPad, PJ.4 carries the onboard 32 kHz crystal **Y4** and is
-not on a header — attach at the crystal pad and ideally remove Y4 (SLAU535B
-§2.2.2, p. 8; Y1 is the *unpopulated* 4–24 MHz HF footprint). Sample rate is
-32768/328 = **99.902 Hz**. If the source is missing, the firmware reports it
-(status bit 0x01, error LED) and falls back to a DCO-derived 100 Hz tick so
+Nothing to wire: the timebase is the LaunchPad's own 32.768 kHz crystal **Y4**,
+already fitted across PJ.4/PJ.5 (LFXIN/LFXOUT), driven in LFXT **crystal mode**
+(SLAU535B §2.2.2, p. 8; Y1 is the *unpopulated* 4–24 MHz HF footprint). Sample
+rate is 32768/328 = **99.902 Hz**. A watch crystal is slow to start, so boot
+allows it ~1 s; if it never starts (Y4 missing or damaged) the firmware reports
+it (status bit 0x01, error LED) and falls back to a DCO-derived 100 Hz tick so
 streaming continues.
 
 ## Toolchain setup
@@ -193,9 +193,9 @@ two's-complement result MSB-first, then two zeros. Code → voltage is
 | LED2 (green, P1.0) blinking 1 Hz | streaming, ticking at the right rate — also a free 1 Hz scope reference |
 | LED1 (red, P4.6) on | init failed, or a config-probe/frame/BUSY error has occurred |
 
-Halt with `mspdebug` and read the globals for detail: `g_status` (0x01 = no
-external 32 kHz and running the DCO fallback tick, 0x02 = ADC link check
-failed), `g_phase` (0 = idle, 1 = streaming), `g_cfg` (raw CONFIG readback,
+Halt with `mspdebug` and read the globals for detail: `g_status` (0x01 = the
+32 kHz crystal never started, running the DCO fallback tick; 0x02 = ADC link
+check failed), `g_phase` (0 = idle, 1 = streaming), `g_cfg` (raw CONFIG readback,
 expect `0x1041`), `g_cfg_cycles` / `g_err_cfg` (idle probes done / failed),
 `g_sample_a`, `g_sample_b`, `g_tick`, `g_err_frame`, `g_err_busy`.
 
@@ -205,7 +205,7 @@ expect `0x1041`), `g_cfg_cycles` / `g_err_cfg` (idle probes done / failed),
    press S1 or S2 → the blink doubles to 1 Hz (streaming).
 2. Scope on P2.2 (CLOCK) → idle shows two 24-clock probe bursts once a second;
    after the button press, a ~20 µs acquisition burst every 10 ms. `g_status`
-   reads 0x0000 with the 32 kHz source attached.
+   reads 0x0000 on a board with a healthy crystal.
 3. Wire the ADC per the table, power the EVM, reflash the normal build → in
    the idle phase the error LED stays off, `g_cfg` reads `0x1041` and
    `g_cfg_cycles` climbs about once a second (the link probe passing over and

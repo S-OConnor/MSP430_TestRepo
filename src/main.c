@@ -122,7 +122,8 @@ static void timer_init(uint8_t status)
      * fires the CCR0 interrupt, resets to 0, and repeats. So the period is
      * (CCR0 + 1) timer clocks — hence the "- 1" on the constants. */
     if (status & ST_NO_LFXT) {
-        /* Fallback (no external 32 kHz): clock the timer from SMCLK.
+        /* Fallback (the 32.768 kHz crystal never started): clock the timer
+         * from SMCLK.
          *   TASSEL__SMCLK  source = SMCLK (8 MHz)
          *   ID__8          input divider /8 -> 1 MHz timer clock
          *   MC__UP         up mode
@@ -132,8 +133,8 @@ static void timer_init(uint8_t status)
         TA0CCTL0 = CCIE;            /* enable the CCR0 compare interrupt */
         TA0CTL = TASSEL__SMCLK | ID__8 | MC__UP | TACLR;
     } else {
-        /* Normal: clock the timer straight from ACLK = the external
-         * 32.768 kHz square wave. 32768 / 328 = 99.902 Hz. */
+        /* Normal: clock the timer straight from ACLK = the LaunchPad's
+         * 32.768 kHz crystal. 32768 / 328 = 99.902 Hz. */
         TA0CCR0 = TICK_PERIOD_ACLK - 1u;
         TA0CCTL0 = CCIE;
         TA0CTL = TASSEL__ACLK | MC__UP | TACLR;

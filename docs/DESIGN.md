@@ -149,7 +149,7 @@ flowchart LR
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
 | Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
 | Button input | S1 (P4.5) and S2 (P1.1), internal pull-ups, **polled** once per tick with a 2-poll (20 ms) debounce — no port interrupt | The CPU already wakes every 10 ms, so the poll is free and the tick spacing *is* the debounce: no second timer, no ISR firing a dozen times inside one contact bounce. Both buttons do the same thing, so the firmware never has to tell them apart. The LaunchPad wires each switch straight to GND with no external pull-up *(LP schematic, p. 37)*, hence `PxREN` + `PxOUT = 1` and active-low sensing. |
-| Sample timebase | The LaunchPad's **onboard 32.768 kHz crystal Y4** on LFXIN/LFXOUT, LFXT in crystal mode → ACLK → Timer_A0, period 328 → 99.902 Hz | Nothing to wire, nothing to solder, nothing to leave behind on the bench: Y4 is already fitted across PJ.4/PJ.5 *(LP §2.2.2, p. 8; LP schematic, p. 37)*, and a watch crystal is a better timebase than a generator on a flying lead into a pin that is not on any header. `LFXTBYPASS = 0` selects crystal mode and `LFXTDRIVE = {2}` matches Y4's 7 pF load *(MCU Table 5-4, p. 26)*. 100.000 Hz is not an integer division of 32768; 328 is the closest. |
+| Sample timebase | The LaunchPad's **onboard 32.768 kHz crystal Y4** on LFXIN/LFXOUT, LFXT in crystal mode → ACLK → Timer_A0, period 328 → 99.902 Hz | Nothing to wire and nothing to solder: Y4 is already fitted across PJ.4/PJ.5 *(LP §2.2.2, p. 8; LP schematic, p. 37)*, neither pin reaches a header, and a watch crystal gives a tens-of-ppm timebase for free. `LFXTBYPASS = 0` selects crystal mode; `LFXTDRIVE = {2}` matches Y4's 7 pF load *(MCU Table 5-4, p. 26)*. 100.000 Hz is not an integer division of 32768; 328 is the closest. |
 | Fallback | If LFXT never starts (Y4 missing or damaged): internal DCO timer at exactly 100 Hz, status flag set | Never hang; make the degraded state visible on the error LED and in `g_status`. A crystal needs hundreds of milliseconds to reach amplitude, so the fault-clear retry window spans ≥1 s before it gives up ([§12](#12-timing-the-100-hz-tick)). |
 | Readout | None from the MCU — the ADC bus itself is the measurement point | The scope has to be on the bus during bring-up anyway, and SDOA already carries both results in full 16-bit resolution. Dropping the UART removes a peripheral, an ISR, a 256-byte buffer and a whole class of "did the host keep up?" failure from the tick path. |
 | Status reporting | Two LEDs, plus every computed value held in a `volatile` global for the debugger | Enough to tell "alive and ticking" from "something is wrong" at a glance — and, because the heartbeat rate doubles at the phase change, which phase the board is in; `mspdebug` supplies the detail when the LED says to look. |
@@ -499,13 +499,13 @@ flowchart LR
 - **ACLK from the LaunchPad's own crystal.** PJ.4/PJ.5 (LFXIN/LFXOUT) already
   carry **Y4**, the board's fitted 32.768 kHz watch crystal *(LP §2.2.2, p. 8;
   LP schematic, p. 37)*, so the timebase costs no external part, no header pin
-  and no rework. `LFXTBYPASS = 0` selects crystal mode — the oscillator circuit
-  drives the crystal, instead of the pin accepting a logic-level clock — and
-  `LFXTDRIVE = {2}` matches it: the data sheet brackets drive {2} at
-  6 pF ≤ C\_L,eff ≤ 9 pF and Y4 is a 7 pF part *(MCU Table 5-4, p. 26; LP
-  schematic, p. 37)*. Crystal mode needs **both** pins switched to the
-  oscillator function (`PJSEL0 |= BIT4 | BIT5`); bypass would have needed only
-  PJ.4.
+  and no rework. `LFXTBYPASS = 0` selects crystal mode — the on-chip
+  oscillator circuit drives the crystal — and `LFXTDRIVE = {2}` matches it:
+  the data sheet brackets drive {2} at 6 pF ≤ C\_L,eff ≤ 9 pF, and Y4 is a
+  7 pF part *(MCU Table 5-4, p. 26; LP schematic, p. 37)*. Crystal mode needs
+  **both** pins switched to the oscillator function
+  (`PJSEL0 |= BIT4 | BIT5`), because the oscillator drives LFXOUT and senses
+  LFXIN.
 - **Crystal start-up is slow, and the bring-up loop has to allow for it.** A
   32 kHz crystal takes hundreds of milliseconds to reach amplitude, and until
   it does, `LFXTOFFG` re-latches as fast as the firmware can clear it. So
@@ -723,11 +723,10 @@ from the ADC's internal reference over the bus, set by firmware in
 
 The 32.768 kHz timebase needs **no connection at all**: it is the LaunchPad's
 own crystal **Y4**, already fitted across PJ.4/PJ.5 (LFXIN/LFXOUT) *(LaunchPad
-§2.2.2, p. 8, and Schematic 1, p. 37)*. Neither pin reaches a header, so there
-was never a convenient place to inject an external clock — which is the reason
-the design takes the board's crystal instead. Leave Y4 in place and leave the
-pads alone. If the crystal is missing or damaged the firmware does not hang: it
-falls back to the DCO-derived 100 Hz tick and raises `ST_NO_LFXT`
+§2.2.2, p. 8, and Schematic 1, p. 37)*. Neither pin reaches a header; the
+crystal is the whole timebase, so leave Y4 in place and leave the pads alone.
+If it is missing or damaged the firmware does not hang: it falls back to the
+DCO-derived 100 Hz tick and raises `ST_NO_LFXT`
 ([§12](#12-timing-the-100-hz-tick)).
 
 #### Pre-power checklist
@@ -1336,10 +1335,8 @@ flowchart TD
 - **Gated / burst clock** — a clock that only toggles when needed and idles
   otherwise; what an SPI master emits.
 - **LFXT / LFXIN, LFXOUT** — the MSP430's low-frequency crystal oscillator and
-  its two pins. Here it runs in crystal mode on the LaunchPad's onboard
-  32.768 kHz crystal Y4. (Its alternative "bypass" mode, in which the
-  oscillator is powered down and LFXIN accepts a logic-level clock from
-  outside, is not used.)
+  the two pins it drives. Here it runs in crystal mode on the LaunchPad's
+  onboard 32.768 kHz crystal Y4, and its output is ACLK.
 - **LPM0** — low-power mode 0: CPU stopped, peripheral clocks running.
 - **LSB** — least significant bit; also the voltage of one code step.
 - **MISO / MOSI (SOMI / SIMO)** — SPI data lines: master-in-slave-out and

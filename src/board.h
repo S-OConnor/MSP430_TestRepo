@@ -34,8 +34,9 @@
  *  MCU clock tree (set up in clocks.c):
  *    MCLK  = 16 MHz  (DCO)         - CPU clock
  *    SMCLK =  8 MHz  (DCO / 2)     - feeds the eUSCI SPI bit clock
- *    ACLK  = 32.768 kHz            - external square wave on LFXIN (bypass),
- *                                    feeds the 100 Hz sample-tick timer
+ *    ACLK  = 32.768 kHz            - LaunchPad crystal Y4 on PJ.4/PJ.5
+ *                                    (LFXT crystal mode), feeds the 100 Hz
+ *                                    sample-tick timer
  *
  *  Analog inputs (EVM headers, odd pins signal / even pins GND):
  *
@@ -78,10 +79,19 @@
  * Using 320 instead would give a "round" 102.4 Hz. */
 #define TICK_PERIOD_ACLK    328u
 
-/* Fallback tick period when the external 32 kHz clock is missing: the timer
+/* Fallback tick period used when the LFXT crystal never starts: the timer
  * then runs from SMCLK/8 = 1 MHz, and 1 MHz / 10000 = exactly 100 Hz (but
  * only as accurate as the internal DCO, roughly +-2 %). */
 #define TICK_PERIOD_SMCLK   10000u
+
+/* How long clock_init() waits for the 32.768 kHz crystal to start, in 10 ms
+ * passes of the oscillator-fault clear/re-test loop: 100 x 10 ms = 1 s.
+ *
+ * A watch crystal takes hundreds of milliseconds to reach amplitude, and the
+ * fault flag keeps re-latching until it does - so this window has to be far
+ * longer than the microseconds a logic-level clock input would have needed,
+ * or every cold boot would falsely report ST_NO_LFXT. */
+#define LFXT_SETTLE_TRIES   100u
 
 /* Idle-phase period, in sample ticks: how often the firmware rewrites and
  * reads back the ADC CONFIG register while it waits for a button press.
@@ -108,8 +118,8 @@
 
 /* ---- status flags (latched into g_status; any nonzero -> error LED) ---- */
 
-#define ST_NO_LFXT          0x01u   /* external 32 kHz never settled; ACLK is
-                                     * on VLO and the tick runs from SMCLK   */
+#define ST_NO_LFXT          0x01u   /* crystal Y4 never started; ACLK is on
+                                     * VLO and the tick runs from SMCLK      */
 #define ST_ADC_NOLINK       0x02u   /* CONFIG readback mismatch during init:
                                      * wiring / M0 strap / EVM power suspect */
 
