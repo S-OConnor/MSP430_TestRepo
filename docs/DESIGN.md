@@ -109,7 +109,6 @@ share.
 flowchart LR
     AIN["2 analog inputs<br/>CHA1 = EVM J2.5<br/>CHB1 = EVM J1.5<br/>0..5 V each"]
     PWR["bench supplies<br/>+5 V, +3.3 V, +/-8 V"]
-    XTAL["external 32.768 kHz<br/>square wave"]
     USB["USB<br/>power + mspdebug flash"]
     BTN["S1 (P4.5) / S2 (P1.1)<br/>LaunchPad buttons"]
 
@@ -119,13 +118,14 @@ flowchart LR
 
     subgraph LP["MSP430FR5969 LaunchPad"]
         MCU["firmware<br/>tick + ADC driver"]
+        Y4["Y4: onboard 32.768 kHz crystal<br/>PJ.4/PJ.5 = LFXIN/LFXOUT"]
     end
 
     SCOPE["scope / logic analyzer<br/>THE measurement point"]
 
     AIN --> ADC
     PWR --> ADC
-    XTAL -->|LFXIN bypass| MCU
+    Y4 -->|"LFXT -> ACLK"| MCU
     USB --> MCU
     BTN -->|"press: idle -> streaming"| MCU
 
@@ -149,8 +149,8 @@ flowchart LR
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
 | Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
 | Button input | S1 (P4.5) and S2 (P1.1), internal pull-ups, **polled** once per tick with a 2-poll (20 ms) debounce — no port interrupt | The CPU already wakes every 10 ms, so the poll is free and the tick spacing *is* the debounce: no second timer, no ISR firing a dozen times inside one contact bounce. Both buttons do the same thing, so the firmware never has to tell them apart. The LaunchPad wires each switch straight to GND with no external pull-up *(LP schematic, p. 37)*, hence `PxREN` + `PxOUT = 1` and active-low sensing. |
-| Sample timebase | External 32.768 kHz square wave into LFXIN (bypass) → Timer_A0, period 328 → 99.902 Hz | User requirement (external low-frequency source). LFXT bypass accepts a 10.5–50 kHz digital square wave at 30–70 % duty *(MCU p. 26)*. 100.000 Hz is not an integer division of 32768; 328 is the closest. |
-| Fallback | If the 32 kHz source is missing: internal DCO timer at exactly 100 Hz, status flag set | Never hang; make the degraded state visible on the error LED and in `g_status`. |
+| Sample timebase | The LaunchPad's **onboard 32.768 kHz crystal Y4** on LFXIN/LFXOUT, LFXT in crystal mode → ACLK → Timer_A0, period 328 → 99.902 Hz | Nothing to wire, nothing to solder, nothing to leave behind on the bench: Y4 is already fitted across PJ.4/PJ.5 *(LP §2.2.2, p. 8; LP schematic, p. 37)*, and a watch crystal is a better timebase than a generator on a flying lead into a pin that is not on any header. `LFXTBYPASS = 0` selects crystal mode and `LFXTDRIVE = {2}` matches Y4's 7 pF load *(MCU Table 5-4, p. 26)*. 100.000 Hz is not an integer division of 32768; 328 is the closest. |
+| Fallback | If LFXT never starts (Y4 missing or damaged): internal DCO timer at exactly 100 Hz, status flag set | Never hang; make the degraded state visible on the error LED and in `g_status`. A crystal needs hundreds of milliseconds to reach amplitude, so the fault-clear retry window spans ≥1 s before it gives up ([§12](#12-timing-the-100-hz-tick)). |
 | Readout | None from the MCU — the ADC bus itself is the measurement point | The scope has to be on the bus during bring-up anyway, and SDOA already carries both results in full 16-bit resolution. Dropping the UART removes a peripheral, an ISR, a 256-byte buffer and a whole class of "did the host keep up?" failure from the tick path. |
 | Status reporting | Two LEDs, plus every computed value held in a `volatile` global for the debugger | Enough to tell "alive and ticking" from "something is wrong" at a glance — and, because the heartbeat rate doubles at the phase change, which phase the board is in; `mspdebug` supplies the detail when the LED says to look. |
 | Integrity | Every ADC frame carries fixed indicator/zero bits which are checked on every read *(ADC Figure 6-7, p. 27)* | Cheap, continuous self-test of wiring and clock phase; failures are counted in the `errs` column and light the error LED. |
@@ -194,9 +194,9 @@ flowchart TD
 flowchart TD
     PO([power-on]) --> WDT["stop watchdog"]
     WDT --> CLK["clocks: 16 MHz MCLK,<br/>8 MHz SMCLK, 32 kHz ACLK"]
-    CLK --> LFXT{"external 32 kHz<br/>alive?"}
+    CLK --> LFXT{"LFXT crystal<br/>started?"}
     LFXT -->|yes| SPI
-    LFXT -->|"no (bounded retry)"| FB["tick from DCO at 100 Hz<br/>g_status: ST_NO_LFXT set<br/>error LED on"] --> SPI
+    LFXT -->|"no (after the ~1 s<br/>start-up window)"| FB["tick from DCO at 100 Hz<br/>g_status: ST_NO_LFXT set<br/>error LED on"] --> SPI
     SPI["init eUSCI_B0 SPI"] --> AINIT["ADC reset / CONFIG readback link check /<br/>references / arm streaming"]
     AINIT --> OK{"readback mode bits<br/>11:4 == 0x04?"}
     OK -->|yes| T0
@@ -478,13 +478,13 @@ SPI; TA0 is the 3-CCR Timer_A instance.)*
 
 ```mermaid
 flowchart LR
-    X["external 32.768 kHz<br/>square wave"] -->|"LFXIN, bypass mode"| ACLK["ACLK<br/>32768 Hz"]
+    X["Y4: onboard 32.768 kHz crystal<br/>(on the LaunchPad)"] -->|"LFXIN + LFXOUT,<br/>LFXT crystal mode"| ACLK["ACLK<br/>32768 Hz"]
     ACLK --> TA0["Timer_A0<br/>CCR0 = 327 -> 99.902 Hz<br/>sample tick"]
 
     DCO["internal DCO<br/>16 MHz"] --> MCLK["MCLK<br/>16 MHz"] --> CPU["CPU<br/>+ 1 FRAM wait state"]
     DCO -->|"/2"| SMCLK["SMCLK<br/>8 MHz"] --> SPI["eUSCI_B0 SPI<br/>/1 -> 8 MHz SCLK = ADC CLOCK"]
 
-    SMCLK -.->|"fallback if the 32 kHz<br/>source is missing: /8 = 1 MHz,<br/>period 10000 -> 100 Hz"| TA0
+    SMCLK -.->|"fallback if LFXT never<br/>starts: /8 = 1 MHz,<br/>period 10000 -> 100 Hz"| TA0
 ```
 
 - **DCO** = digitally-controlled oscillator, the chip's internal RC clock.
@@ -496,14 +496,24 @@ flowchart LR
 - **SMCLK at 8 MHz** is what the SPI divides down from: ÷1 → 8 MHz SCLK,
   which is the ADC's CLOCK. The eUSCI's own SPI-master clock ceiling is in
   *(MCU Table 5-18, p. 38)*.
-- **ACLK from LFXIN in bypass mode.** "Bypass" means "there is no crystal,
-  an external logic-level clock is being fed in" — the user's 32.768 kHz
-  square wave. With `LFXTBYPASS = 1` the LFXT oscillator circuit is powered
-  down and the pin accepts a digital square wave of 10.5–50 kHz at 30–70 %
-  duty cycle *(MCU p. 26)*, so 32.768 kHz sits comfortably in range. If the
-  source is missing, an oscillator-fault flag stays latched; the firmware
-  retries a bounded number of times and then falls back to a DCO-based tick,
-  flagging the condition (`ST_NO_LFXT`) rather than hanging.
+- **ACLK from the LaunchPad's own crystal.** PJ.4/PJ.5 (LFXIN/LFXOUT) already
+  carry **Y4**, the board's fitted 32.768 kHz watch crystal *(LP §2.2.2, p. 8;
+  LP schematic, p. 37)*, so the timebase costs no external part, no header pin
+  and no rework. `LFXTBYPASS = 0` selects crystal mode — the oscillator circuit
+  drives the crystal, instead of the pin accepting a logic-level clock — and
+  `LFXTDRIVE = {2}` matches it: the data sheet brackets drive {2} at
+  6 pF ≤ C\_L,eff ≤ 9 pF and Y4 is a 7 pF part *(MCU Table 5-4, p. 26; LP
+  schematic, p. 37)*. Crystal mode needs **both** pins switched to the
+  oscillator function (`PJSEL0 |= BIT4 | BIT5`); bypass would have needed only
+  PJ.4.
+- **Crystal start-up is slow, and the bring-up loop has to allow for it.** A
+  32 kHz crystal takes hundreds of milliseconds to reach amplitude, and until
+  it does, `LFXTOFFG` re-latches as fast as the firmware can clear it. So
+  clock bring-up clears `LFXTOFFG`/`OFIFG` and re-checks over a window of at
+  least **1 s** before concluding the oscillator is dead — a tight
+  clear-and-retest loop with no delay in it would time out on every healthy
+  boot. Only after that window does the firmware re-route ACLK to the VLO,
+  fall back to a DCO-based tick and raise `ST_NO_LFXT`, rather than hanging.
 
 ### 9.3 Pin map
 
@@ -520,13 +530,15 @@ each pin's `PxSEL1`/`PxSEL0` encodings.
 | P2.6 | GPIO output | CONVST (13) | Table 6-54, p. 94 |
 | P4.2 | GPIO output | RD (11) | Table 6-58, p. 101 |
 | P1.5 | GPIO input, pulldown | BUSY (5) | Table 6-50, p. 88 |
-| PJ.4 | LFXIN | external 32.768 kHz | Table 6-60, p. 106 |
+| PJ.4 / PJ.5 | LFXIN / LFXOUT | nothing — onboard crystal **Y4** | Table 6-60, p. 106 |
 | P1.0 / P4.6 | GPIO output | LEDs, on the LaunchPad (heartbeat / error) | Tables 6-49, p. 86 / 6-59, p. 103 |
 | P4.5 | GPIO input, pull-up | button S1, on the LaunchPad | Table 6-59, p. 103 |
 | P1.1 | GPIO input, pull-up | button S2, on the LaunchPad | Table 6-49, p. 86 |
 
-The last three rows need no wiring: the LEDs and both buttons are on the
-LaunchPad itself *(LP schematic, p. 37)*. The buttons short their pin to
+The last four rows need no wiring: the crystal, the LEDs and both buttons are
+all on the LaunchPad itself *(LP §2.2.2, p. 8, and schematic, p. 37)*. PJ.4 and
+PJ.5 are not brought out to a header at all — they go only to Y4, which is
+precisely why the timebase is taken from that crystal rather than fed in. The buttons short their pin to
 ground when pressed and float otherwise, so `clocks.c` enables each pin's
 internal resistor as a **pull-up** (`PxDIR = 0`, `PxREN = 1`, `PxOUT = 1`) and
 a press reads as a low level. The LaunchPad's own naming is worth keeping
@@ -550,7 +562,7 @@ open.
 
 MSP430 pins are multi-function; two "select" bits per pin decide whether
 the pin is plain GPIO or belongs to a peripheral. `clocks.c` sets those
-(`PxSEL1`/`PxSEL0`) for the SPI and LFXIN pins. FRAM-family parts
+(`PxSEL1`/`PxSEL0`) for the SPI pins and for both LFXT pins. FRAM-family parts
 also keep all pins in high-impedance after reset until a lock bit
 (`LOCKLPM5`) is cleared: "after a BOR reset, the ports must be configured
 first and then the `LOCKLPM5` bit must be cleared" *(MCU p. 63)* — done right
@@ -654,14 +666,13 @@ at **TP3**, remove **R34** and feed AVDD at **TP2** *(EVM §2.1, p. 4)*.
 ```mermaid
 flowchart LR
     USB["USB host<br/>LaunchPad power + mspdebug flash"]
-    FG["function generator<br/>32.768 kHz square wave, 0-3.3 V"]
     P5["bench supply<br/>+5 V"]
     PB["bench supply<br/>+8 V / -8 V"]
     AIN["2 signal sources<br/>0..5 V"]
 
     subgraph LPP["MSP-EXP430FR5969 LaunchPad"]
         V33["3V3 pin<br/>J4 / BoosterPack 1"]
-        Y4["Y4 crystal pad = PJ.4 / LFXIN<br/>not brought out to any header"]
+        Y4["Y4: onboard 32.768 kHz crystal<br/>timebase, nothing to connect"]
     end
 
     subgraph EVMP["ADC168M102REVM-PDK"]
@@ -678,14 +689,12 @@ flowchart LR
     PB -->|"+8 V / -8 V"| J34
     AIN --> J2H
     AIN --> J1H
-    FG -->|"solder at the pad;<br/>remove Y4 first"| Y4
 
-    GND(["common ground: both boards,<br/>all three supplies,<br/>the generator and the scope"])
+    GND(["common ground: both boards,<br/>all three supplies<br/>and the scope"])
     LPP --- GND
     EVMP --- GND
     P5 --- GND
     PB --- GND
-    FG --- GND
 ```
 
 | Rail | From | To | Limits *(EVM Table 1-1, p. 3)* |
@@ -712,13 +721,14 @@ The other six channel inputs (J2.1/3/7, J1.1/3/7) stay open, and jumpers
 from the ADC's internal reference over the bus, set by firmware in
 [§10.2](#102-the-initialization-sequence-adc168_init), so no jumper move is needed.
 
-The 32.768 kHz timebase is the one connection with nowhere convenient to land:
-**PJ.4/LFXIN is not brought out to any LaunchPad header** — it goes only to the
-onboard crystal **Y4** *(LaunchPad §2.2.2, p. 8, and Schematic 1, p. 37)*. Feed
-the external square wave at the Y4 pad, and ideally remove Y4 first so the
-crystal is not fighting the generator. If that wire is missing or wrong the
-firmware does not hang: it falls back to the DCO-derived 100 Hz tick and raises
-`ST_NO_LFXT` ([§12](#12-timing-the-100-hz-tick)).
+The 32.768 kHz timebase needs **no connection at all**: it is the LaunchPad's
+own crystal **Y4**, already fitted across PJ.4/PJ.5 (LFXIN/LFXOUT) *(LaunchPad
+§2.2.2, p. 8, and Schematic 1, p. 37)*. Neither pin reaches a header, so there
+was never a convenient place to inject an external clock — which is the reason
+the design takes the board's crystal instead. Leave Y4 in place and leave the
+pads alone. If the crystal is missing or damaged the firmware does not hang: it
+falls back to the DCO-derived 100 Hz tick and raises `ST_NO_LFXT`
+([§12](#12-timing-the-100-hz-tick)).
 
 #### Pre-power checklist
 
@@ -727,7 +737,7 @@ firmware does not hang: it falls back to the DCO-derived 100 Hz tick and raises
 3. EVM J5 pin 17 strapped to pin 18 (M0 = 0).
 4. Seven signal wires plus **two** ground wires between the boards.
 5. JP1/JP2 in `CMx_EXT` (default — leave them alone).
-6. Every ground tied together: both boards, all three supplies, generator, scope.
+6. Every ground tied together: both boards, all three supplies, scope.
 7. ±8 V present if you intend to read real analog values.
 
 ---
@@ -1032,8 +1042,8 @@ field of the init CONFIG word, the C field of every per-conversion command,
 
 ## 12. Timing: the 100 Hz tick
 
-Timer_A0 counts ACLK pulses (32 768 per second, from LFXIN in bypass mode —
-*MCU p. 26*) in "up mode": it counts
+Timer_A0 counts ACLK pulses (32 768 per second, from the LaunchPad's onboard
+crystal Y4 on LFXIN/LFXOUT — *MCU Table 5-4, p. 26*) in "up mode": it counts
 0 → CCR0, fires an interrupt, and starts over. With CCR0 = 327 the period
 is 328 counts:
 
@@ -1052,9 +1062,11 @@ sub-microsecond, *MCU p. 31*). The deeper LPM3 would stop SMCLK, and SMCLK is ex
 what clocks the tick timer in the no-LFXT fallback below — so LPM3 would
 leave that configuration asleep forever.
 
-Fallback: if the external oscillator is absent, the timer runs from
+Fallback: if LFXT never starts — Y4 removed or damaged — the timer runs from
 SMCLK/8 = 1 MHz with a period of 10 000 → exactly 100 Hz, but only as
-accurate as the DCO (~±2 %). `g_status` bit 0x01 reports this.
+accurate as the DCO (~±2 %). `g_status` bit 0x01 reports this. Reaching that
+fallback takes about a second of boot time, because that is how long a healthy
+crystal may need to start ([§9.2](#92-clock-tree)).
 
 ### One timebase, two phases
 
@@ -1079,7 +1091,9 @@ make. A press is therefore never missed and never counted twice.
 The idle phase's 1 s period is a *human* timebase, not a measurement one:
 it wants to be slow enough to watch on a scope and to leave the bus obviously
 quiet in between, so its accuracy does not matter — in the no-LFXT fallback it
-becomes 1.000 s ± 2 % and nothing cares.
+becomes 1.000 s ± 2 % and nothing cares. The streaming rate is the opposite
+case: on Y4 it is as accurate as a watch crystal — tens of ppm — which is what
+makes quoting it as 99.902 Hz meaningful in the first place.
 
 ---
 
@@ -1237,7 +1251,7 @@ hangs and never stops ticking.
 
 | Condition | Detection | Response |
 |---|---|---|
-| External 32 kHz absent | Oscillator fault flag never clears (bounded retry) | Switch tick timer to DCO, set `ST_NO_LFXT` (0x01), error LED |
+| LFXT never starts (Y4 missing or damaged) | Oscillator fault flag still re-latching at the end of the ~1 s start-up window | Switch ACLK to VLO and the tick timer to DCO, set `ST_NO_LFXT` (0x01), error LED |
 | ADC not wired / unpowered / wrong strap | CONFIG readback mismatch at init | Set `ST_ADC_NOLINK` (0x02) and light the error LED *before the first tick*; raw readback kept in `g_cfg`; keep running |
 | Link lost *after* init (wire pulled, EVM powered down) | Idle-phase CONFIG probe mismatch, checked once a second | `g_err_cfg` incremented, error LED latched, `g_cfg` holds the bad readback; probing continues |
 | Conversion never completes | BUSY still high after timeout | Both channels set to −32768, `g_err_busy` incremented, error LED latched |
@@ -1257,7 +1271,7 @@ tick is running, and which phase it is in.
 flowchart TD
     START([something looks wrong]) --> HB{"heartbeat LED<br/>(green, P1.0)?"}
 
-    HB -->|dark| NOTICK["tick not running:<br/>check the 32 kHz source,<br/>halt and read g_tick"]
+    HB -->|dark| NOTICK["tick not running:<br/>halt and read g_tick<br/>and g_status"]
     HB -->|"blinking 0.5 Hz"| IDLE["still in the idle phase —<br/>no conversions yet by design.<br/>Press S1 (P4.5) or S2 (P1.1);<br/>the blink should double"]
     HB -->|"blinking 1 Hz"| ERRLED{"error LED on?"}
 
@@ -1268,7 +1282,7 @@ flowchart TD
     ERRLED -->|no| DATA{"data on SDOA<br/>look right?"}
     ERRLED -->|yes| STATUS{"read g_status"}
 
-    STATUS -->|0x01| S1["no external 32 kHz:<br/>running on DCO fallback tick.<br/>Check the square wave into PJ.4<br/>(MCU p. 26; remove crystal Y4)"]
+    STATUS -->|0x01| S1["LFXT never started:<br/>running on DCO fallback tick.<br/>Check crystal Y4 is fitted and intact<br/>(LP §2.2.2, p. 8)"]
     STATUS -->|0x02| S2["ADC link check failed.<br/>g_cfg holds the raw readback,<br/>expect 0x1041. Check J5 wiring,<br/>supplies, M0 strap<br/>(EVM Figure 2-4, p. 6)"]
     STATUS -->|0x00| S0{"which counter<br/>is climbing?"}
 
@@ -1284,7 +1298,7 @@ flowchart TD
 
 | Symptom | Likely cause | Firmware behaviour | What to do |
 |---|---|---|---|
-| Error LED on, `g_status = 0x01` | 32.768 kHz source not reaching LFXIN | Runs at DCO 100 Hz | Check the square wave: 0–3.3 V, 10.5–50 kHz, 30–70 % duty *(MCU p. 26)*, connected to PJ.4 *(MCU Table 6-60, p. 106)*; remove the onboard 32 kHz crystal **Y4** *(LP §2.2.2, p. 8)* |
+| Error LED on, `g_status = 0x01` | LFXT never started: crystal **Y4** missing, damaged, or its pads lifted by earlier rework | Runs at DCO 100 Hz, ~±2 % | Check that Y4 is fitted across PJ.4/PJ.5 and its solder is intact *(LP §2.2.2, p. 8; LP schematic, p. 37)*. Neither pin is on a header, so ACLK cannot be probed directly — the tick rate is the evidence. If the fault only appears on cold boots, the start-up window is too short ([§9.2](#92-clock-tree)) |
 | Error LED on, `g_status = 0x02`, `g_cfg = 0x0000`/`0xFFFF` | SDOA/SDI/RD/~CS wiring, ADC unpowered, PHI board still attached | Keeps running; all frames will fail | Check J5 wiring *(EVM Figure 2-4, p. 6)*, DVDD 2.3–5.5 V / AVDD 2.7–5.5 V *(EVM Table 1-1, p. 3; supplied via TP3/TP2 with R19/R34 removed, EVM §2.1, p. 4)*, M0 strap, PHI removed |
 | `g_err_frame` climbing, SDOA looks shifted | Clock phase / strobe timing / long jumper wires at 8 MHz | Bad frames rejected and counted | Set `ADC_SCLK_DIV` to 2 or 4 in `board.h` — the ADC accepts down to 0.5 MHz *(ADC §6.3.1.4, p. 19)* (risk A in PLAN.md) |
 | Frame A and frame B swapped, or a signal in neither | Analog wiring | — | CHA1 is EVM **J2** pin 5, CHB1 is **J1** pin 5 (even pins GND) *(EVM Figure 2-3, p. 5)*; check `ADC_PAIR` matches the header pins used |
@@ -1293,7 +1307,7 @@ flowchart TD
 | Error LED on while idle, `g_err_cfg` climbing | The digital link failed *after* init — a wire pulled loose, EVM powered down, PHI board re-fitted | Keeps probing once a second; nothing converts | Same checks as `g_status = 0x02`; `g_cfg` holds the latest raw readback |
 | `g_err_frame` jumps by 1–2 exactly at the button press, then stops | Mode-change pipeline: the first readouts after arming were framed as `SR = 0` | Those samples rejected, streaming continues correctly | Expected only if the flush was shortened — `adc168_start_stream()` burns two conversions for this reason *(ADC §6.5.2.2, p. 26)* |
 | Pressing a button does nothing | Wrong pin assumption, or the pull-up is not enabled | Stays idle | Confirm S1 = P4.5 / S2 = P1.1 on the board *(LP schematic, p. 37)*; check `P4REN`/`P1REN` setup in `clocks.c`, and that `PM5CTL0 & LOCKLPM5` was cleared |
-| No bus traffic at all; heartbeat LED dark | Tick timer never fires, or the firmware never got past init | — | Confirm the 32 kHz source, then halt with `mspdebug` and read `g_tick` |
+| No bus traffic at all; heartbeat LED dark | Tick timer never fires, or the firmware never got past init | — | Halt with `mspdebug` and read `g_tick` and `g_status` |
 | Rate slightly off 100 Hz | Intended — 32768 has no integer divisor giving 100.000 Hz | Ticks at 99.902 Hz | Change `TICK_PERIOD_ACLK` in `board.h` if a different rate is wanted |
 
 ---
@@ -1321,8 +1335,11 @@ flowchart TD
   tick. A button press moves idle → streaming, and only a reset moves back.
 - **Gated / burst clock** — a clock that only toggles when needed and idles
   otherwise; what an SPI master emits.
-- **LFXIN, bypass** — low-frequency crystal input, configured to accept an
-  external logic-level clock instead of a crystal.
+- **LFXT / LFXIN, LFXOUT** — the MSP430's low-frequency crystal oscillator and
+  its two pins. Here it runs in crystal mode on the LaunchPad's onboard
+  32.768 kHz crystal Y4. (Its alternative "bypass" mode, in which the
+  oscillator is powered down and LFXIN accepts a logic-level clock from
+  outside, is not used.)
 - **LPM0** — low-power mode 0: CPU stopped, peripheral clocks running.
 - **LSB** — least significant bit; also the voltage of one code step.
 - **MISO / MOSI (SOMI / SIMO)** — SPI data lines: master-in-slave-out and
@@ -1390,10 +1407,10 @@ keys are defined in [Reference documents](#reference-documents).
 | Page | Section / table | What it establishes | Used in |
 |---|---|---|---|
 | 5 | Device comparison | eUSCI_B0 does SPI/I²C; TA0 is the Timer_A instance used | [§9.1](#91-the-msp430fr5969-in-one-paragraph) |
-| 12–15 | Table 4-1, Signal Descriptions | MSP430 names for the SPI lines (UCB0CLK/SIMO/SOMI) and PJ.4/LFXIN | [§6](#6-what-spi-is) |
+| 12–15 | Table 4-1, Signal Descriptions | MSP430 names for the SPI lines (UCB0CLK/SIMO/SOMI) and PJ.4/PJ.5 = LFXIN/LFXOUT | [§6](#6-what-spi-is) |
 | 17–18 | §5.4 active-mode supply current, wait-state tables | 0 wait states only to 8 MHz — 16 MHz MCLK needs `NWAITSx = 1` | [§9.2](#92-clock-tree) |
 | 19 | §5.6 Low-Power Mode (LPM0, LPM1) Supply Currents | What LPM0 costs between ticks | [§12](#12-timing-the-100-hz-tick) |
-| 26 | LFXT oscillator characteristics | `LFXTBYPASS = 1`: external digital square wave, 10.5–50 kHz, 30–70 % duty | [§2](#2-key-design-decisions), [§9.2](#92-clock-tree), [§12](#12-timing-the-100-hz-tick), [§16.2](#162-the-detail-behind-each-leaf) |
+| 26 | Table 5-4, LFXT oscillator characteristics | Crystal mode (`LFXTBYPASS = 0`): f = 32768 Hz, and the `LFXTDRIVE` ↔ load-capacitance brackets that put Y4's 7 pF at drive {2} | [§2](#2-key-design-decisions), [§9.2](#92-clock-tree), [§12](#12-timing-the-100-hz-tick), [§16.2](#162-the-detail-behind-each-leaf) |
 | 29 | DCO frequency ranges | The calibrated DCO settings behind 16 MHz MCLK / 8 MHz SMCLK | [§9.2](#92-clock-tree) |
 | 31 | Wake-up timing | LPM0 → active wake-up is sub-microsecond, so the tick's ~2 µs latency is real | [§12](#12-timing-the-100-hz-tick) |
 | 38–39 | Tables 5-18, 5-19, eUSCI SPI master mode | Supported SPI master clock frequencies and setup/valid times at 8 MHz | [§2](#2-key-design-decisions), [§6](#6-what-spi-is), [§9.2](#92-clock-tree) |
@@ -1412,6 +1429,6 @@ designators are its own — so those come from the two user's guides.
 | EVM | 4 | §2.1, power circuit | Remove R19 → feed DVDD at TP3; remove R34 → feed AVDD at TP2 | [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
 | EVM | 5 | §2.2 + Figure 2-3, analog inputs | J2 = channel A, J1 = channel B; **J2 pin 5 = CHA1, J1 pin 5 = CHB1**; JP1/JP2 default to `CMx_EXT` | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§16.2](#162-the-detail-behind-each-leaf) |
 | EVM | 6 | §2.3 + Figure 2-4, ADC circuit | The whole J5 pinout (SDOA 1, BUSY 5, CLK 7, ~CS 9, RD 11, CONVST 13, SDI 15, M0 17, M1 19); 22 µF on REFIO1/REFIO2; J5 is meant for scope/logic-analyzer probing and an external controller | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§14](#14-getting-at-the-data-the-scope), [§16](#16-what-can-go-wrong-and-how-the-firmware-reacts) |
-| LP | 8 | §2.2.2, Clocking | **Y4 is the populated 32 kHz crystal**; Y1 is an unpopulated 4–24 MHz HF footprint | [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
+| LP | 8 | §2.2.2, Clocking | **Y4 is the populated 32 kHz crystal** — the timebase this design uses (schematic p. 37: 32.768 kHz, 7 pF load); Y1 is an unpopulated 4–24 MHz HF footprint | [§2](#2-key-design-decisions), [§9.2](#92-clock-tree), [§9.3](#93-pin-map), [§9.4](#94-wiring), [§12](#12-timing-the-100-hz-tick), [§16.2](#162-the-detail-behind-each-leaf) |
 | LP | 21 | Figure 15, BoosterPack connector pinout | Which BoosterPack pin each port pin lands on: J4 = pins 1–10 (3V3 1, P4.2 2, P2.6 3, P2.2 7), J5 = pins 11–20 (P1.4 12, P1.5 13, P1.7 14, P1.6 15, GND 20) | [§9.4](#94-wiring) |
 | LP | 37 | Schematic | Left user-interface cluster: **S1 on P4.5, LED1 (red) on P4.6**; right cluster: **S2 on P1.1, LED2 (green) on P1.0** — both switches to GND with no external pull-up; Y4 across PJ.4/PJ.5 | [§2](#2-key-design-decisions), [§9.3](#93-pin-map), [§9.4](#94-wiring), [§14](#14-getting-at-the-data-the-scope), [§16.2](#162-the-detail-behind-each-leaf) |
