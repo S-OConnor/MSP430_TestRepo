@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate docs/img/config-read-timing.svg — one column per statement in the
-CONFIG-readback path of adc168_init(). Run from the repo root."""
+CONFIG-readback path (adc168_config_cycle(): the init link check, and the
+idle phase's once-a-second probe). Run from the repo root."""
 
 CLK_W    = 13.0          # px per SCLK cycle (8 per byte)
 AMP      = 20.0
@@ -98,8 +99,9 @@ add(f'<rect width="{WIDTH:.0f}" height="{HEIGHT:.0f}" fill="{BG}"/>')
 
 text(LEFT, Y_TITLE, "Reading the ADC CONFIG register — one column per statement",
      size=18, weight="700", anchor="start", family=SANS)
-text(LEFT, Y_SUB, "adc168_init() link check: write CONFIG 0x1041, then clock the "
-     "reply off SDOA.  SCLK 8 MHz, CPOL=0/CPHA=1, MSB first.",
+text(LEFT, Y_SUB, "adc168_config_cycle(): write CONFIG 0x1041, then clock the "
+     "reply off SDOA — the init link check, and the idle phase once a second.  "
+     "SCLK 8 MHz, CPOL=0/CPHA=1, MSB first.",
      size=11.5, fill=DIM, anchor="start", family=SANS)
 
 # ---- function brackets + per-column code labels -------------------------

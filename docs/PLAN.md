@@ -12,6 +12,7 @@ Agreed decisions:
 - **Timebase**: external 32.768 kHz square wave into LFXIN (LFXT **bypass**) → ACLK.
 - **Rate**: Timer_A0 up mode on ACLK, CCR0=327 (period 328) → **99.902 Hz** (closest exact fit to 100 Hz; 2^15 has only power-of-2 divisors). 320→102.4 Hz is a one-constant alternative.
 - **Readout**: none from the MCU. SDOA carries both 16-bit results every tick; a scope/logic analyzer on the bus is the measurement instrument, triggered on CONVST. Health is reported on the two LaunchPad LEDs, detail via `volatile` globals read with mspdebug.
+- **Start of acquisition** *(amendment, post-Phase 6, per user)*: the firmware does not stream out of reset. It boots into an **idle phase** that repeats the Phase 4 link check — write `CONFIG = 0x1041`, read it back — once a second (`IDLE_CONFIG_TICKS = 100` ticks) and polls the LaunchPad buttons every tick; pressing **S1 (P4.5)** or **S2 (P1.1)** writes the operating word `0x5140`, flushes two conversions, and switches to the Phase 6 streaming loop for good (reset returns to idle). Buttons are polled on the existing tick with a 2-poll debounce (`BTN_DEBOUNCE_POLLS`), internal pull-ups, active low — no port ISR. The heartbeat LED doubles from a 0.5 Hz to a 1 Hz blink at the hand-over. New observables: `g_phase`, `g_cfg_cycles`, `g_err_cfg`. Rationale: the idle phase proves the digital link at a watchable rate while the analog side is still being wired or probed, and nothing converts into a half-built setup. **Note the correction it forced:** LED1 (red) is on **P4.6** and LED2 (green) on **P1.0** — the reverse of the naming used in the earlier phases (SLAU535B schematic p. 37); the pins the firmware drives are unchanged, only their names/colours.
 - **Toolchain**: TI msp430-elf-gcc + Makefile, mspdebug/UniFlash. *Nothing installed on this machine yet.*
 
 ## Hardware reference (goes in README; user performs wiring)
@@ -65,7 +66,7 @@ msp430/
 ├── docs/                      # reference PDFs (present; add SBASAW9)
 └── src/
     ├── board.h                # pin map macros, tunables (ADC_PAIR, ADC_SCLK_DIV, tick period)
-    ├── main.c                 # tick loop, ISRs, observable globals, LEDs
+    ├── main.c                 # phase state machine, tick loop, ISRs, buttons, observable globals, LEDs
     ├── clocks.c/.h            # clock_init(): LFXT bypass + fault fallback
     ├── spi.c/.h               # eUSCI_B0 master, spi_xfer()
     └── adc168m102.c/.h        # ADC driver
@@ -113,6 +114,12 @@ Each phase is independently flashable and verified before the next begins; ADC h
 
 **Work**: per tick: one `adc168_read(&va, &vb)` (~20 µs); on failure set both channels to INT16_MIN + bump the matching error counter; publish `g_sample_a`/`g_sample_b`/`g_tick` into `volatile` globals for the debugger; heartbeat LED 1 Hz, error LED latched on any nonzero counter or nonzero init status.
 **Exit criteria**: distinct DC levels on EVM J2.5 (CHA1) and J1.5 (CHB1) appear in the right columns and are not transposed; grounding a neighbouring input (J2.3 = CHA2) changes nothing, confirming the mux sits on pair 1.
+
+## Phase 6a — Idle phase + button start (`main.c`, `adc168m102.c`) — added after Phase 6
+
+**Work**: split the driver's init tail into two reusable calls — `adc168_config_cycle()` (write `0x1041`, RD + 3-byte read: the Phase 4 link check) and `adc168_start_stream()` (write `0x5140` + two flush conversions) — and have `adc168_init()` use both, so the probe/arm sequences are the same code at boot and at runtime; add `adc168_config_ok()` for the bits-11:4 test. In `clocks.c`, make P4.5/P1.1 inputs with internal pull-ups. In `main.c`, add `g_phase`: idle ticks poll the buttons and run one config cycle every 100th tick (publishing `g_cfg`/`g_cfg_cycles`/`g_err_cfg` and toggling the heartbeat), streaming ticks are the Phase 6 loop unchanged. Note the operating CONFIG write moves after the reference registers, into `adc168_start_stream()`.
+**Watch item**: the probe word has `SR = 0`, so the hand-over *must* rewrite CONFIG and flush two conversions — otherwise the first readouts are parsed with the wrong framing (ADC §6.5.2.2), showing up as `g_err_frame` stepping at the press.
+**Exit criteria**: from reset, the heartbeat blinks 0.5 Hz and the bus shows two 24-clock accesses per second with no CONVST edge; a press doubles the blink and starts 10 ms acquisition bursts, with `g_err_frame` staying 0 across the transition.
 
 ## Phase 7 — Soak & hardening
 

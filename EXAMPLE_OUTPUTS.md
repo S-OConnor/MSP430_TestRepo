@@ -4,21 +4,36 @@ What a healthy board actually produces on the wire. With no UART in the
 firmware, the ADC bus *is* the output: everything below is what you should see
 on a scope or logic analyzer.
 
+The board powers up in the **idle phase** — the register exchange below,
+repeated once a second, and nothing else — and starts converting only when S1
+(P4.5) or S2 (P1.1) is pressed. So the first two sections are also the two
+things the scope shows before and after that press.
+
 - [Configuration readback timing](#configuration-readback-timing) — CLOCK, ~CS,
   CONVST, RD, BUSY, MISO and MOSI through the link check, one column per
-  statement of C.
-- [An acquisition burst](#an-acquisition-burst) — what one tick looks like, and
-  how to turn the five readout bytes into two numbers.
+  statement of C. This is the whole of the idle phase.
+- [An acquisition burst](#an-acquisition-burst) — what one tick looks like once
+  a button has been pressed, and how to turn the five readout bytes into two
+  numbers.
 - [Failure signatures](#failure-signatures) — what a broken link looks like.
 
 ## Configuration readback timing
 
-This is the one register *read* the firmware performs: the link check in
-[`adc168_init()`](src/adc168m102.c), which writes `CONFIG = 0x1041` (`R=01`
-full update, `PDE=1`, action `A=0001` = "read CONFIG back") and then clocks the
-reply frame off SDOA. It is the cheapest end-to-end proof that ~CS, RD, CLOCK,
-SDI and SDOA are all wired and phased correctly, and its result is what the
-firmware parks in `g_cfg` for the debugger.
+This is the one register *read* the firmware performs, and it happens in two
+places: once inside [`adc168_init()`](src/adc168m102.c) as the link check, and
+then once a second for as long as the board stays in the idle phase — both
+through [`adc168_config_cycle()`](src/adc168m102.c). It writes
+`CONFIG = 0x1041` (`R=01` full update, `PDE=1`, action `A=0001` = "read CONFIG
+back") and then clocks the reply frame off SDOA. It is the cheapest end-to-end
+proof that ~CS, RD, CLOCK, SDI and SDOA are all wired and phased correctly, and
+its result is what the firmware parks in `g_cfg` for the debugger.
+
+**This is also the entire bus signature of the idle phase.** Before the button
+press, the two accesses below are all that ever appears on the wire: ~6 µs of
+traffic, then ~1 s of silence, forever. Trigger on **RD** (J5.11) rather than
+CONVST — CONVST does not move at all until streaming starts. Each repeat
+refreshes `g_cfg` and bumps `g_cfg_cycles`; a readback that stops matching
+bumps `g_err_cfg` and lights the red LED.
 
 ![CONFIG readback timing: CLOCK, ~CS, CONVST, RD, BUSY, MISO and MOSI, one column per C statement](docs/img/config-read-timing.svg)
 
@@ -69,18 +84,22 @@ trailing zeros, leaving `0x1041`. The check is on bits 11:4 of the readback:
 ```
 
 A mismatch (a dead MISO reads `0x0000` or `0xFFFF`) sets `ST_ADC_NOLINK`, which
-lights the error LED before the first tick.
+lights the error LED (red, P4.6) before the first tick.
 
 > A real acquisition uses the same vocabulary but moves the other two lines —
-> that is the next section.
+> that is the next section. Press **S1** or **S2** to get there: the firmware
+> rewrites CONFIG to `0x5140` (`SR = 1`, `C = ADC_PAIR`), runs two throw-away
+> conversions to flush the mode-change pipeline, and from the next tick on the
+> trace below repeats every 10 ms. On the LEDs, the green heartbeat doubles
+> from a 0.5 Hz to a 1 Hz blink.
 
 ## An acquisition burst
 
-This is what the firmware does 99.902 times a second, and the only place the
-conversion results appear. Probe **SDOA** (EVM J5.1) for data and trigger on
-**CONVST** (J5.13), rising edge, single shot — CONVST pulses once per tick with
-~10 ms of quiet either side, so the capture lands on a whole acquisition every
-time. Feed CLOCK (J5.7) to the analyzer as the bit clock; MISO is sampled on
+This is what the firmware does 99.902 times a second **once streaming has been
+started with a button**, and the only place the conversion results appear.
+Probe **SDOA** (EVM J5.1) for data and trigger on **CONVST** (J5.13), rising
+edge, single shot — CONVST pulses once per tick with ~10 ms of quiet either
+side, so the capture lands on a whole acquisition every time. Feed CLOCK (J5.7) to the analyzer as the bit clock; MISO is sampled on
 the **falling** edge (CPOL=0/CPHA=1, MSB first).
 
 ```
@@ -143,6 +162,9 @@ LED when it fails.
 
 | Symptom | Meaning | Where to look |
 |---|---|---|
+| No acquisition bursts; heartbeat blinking 0.5 Hz; two register accesses per second | Not a failure — the board is still in the idle phase. | Press S1 (P4.5) or S2 (P1.1); halt and read `g_phase` (0 = idle, 1 = streaming) |
+| Pressed a button, nothing changed | The press was not seen: wrong pin, pull-up not enabled, or `LOCKLPM5` still set. | `g_phase` stays 0; check the `P4REN`/`P1REN` setup in [src/clocks.c](src/clocks.c) |
+| Error LED lights while idle, `g_err_cfg` climbing | The link was fine at init and broke afterwards — a wire pulled loose, EVM power lost. | `g_cfg` holds the latest raw readback; check J5 wiring and EVM supplies |
 | Heartbeat LED dark, no bus traffic | The tick never runs — firmware stuck before `timer_init()`, or the timer never fires. | Halt with `mspdebug`, read `g_tick` and `g_status` |
 | Error LED on from power-up, `g_status = 0x0001` | External 32 kHz never settled; the tick fell back to the DCO-derived 100 Hz. Bus traffic continues, timebase accuracy drops to ~±2 %. | LFXIN square wave at PJ.4 / crystal Y1 |
 | Error LED on, `g_status = 0x0002`, `g_cfg = 0x0000` | Link check failed with SDOA stuck low — nothing is driving the line. | ~CS wiring, EVM DVDD, PHI controller board still fitted |

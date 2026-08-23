@@ -83,6 +83,20 @@
  * only as accurate as the internal DCO, roughly +-2 %). */
 #define TICK_PERIOD_SMCLK   10000u
 
+/* Idle-phase period, in sample ticks: how often the firmware rewrites and
+ * reads back the ADC CONFIG register while it waits for a button press.
+ * 100 ticks x ~10 ms = ~1 s. The tick timer keeps running at ~100 Hz in both
+ * phases - only what a tick DOES changes - so this is the one constant that
+ * sets the idle repeat rate, and the 10 ms tick doubles as the button poll
+ * and its debounce interval. */
+#define IDLE_CONFIG_TICKS   100u
+
+/* Consecutive 10 ms polls a button must read "down" before the firmware
+ * accepts the press. 2 -> the contact must be stable for >=10 ms, which is
+ * past the bounce of these tact switches, and no press a human can make is
+ * short enough to miss. */
+#define BTN_DEBOUNCE_POLLS  2u
+
 /* How many polling-loop iterations to wait for BUSY to drop after a
  * conversion. The conversion itself needs ~18 of our 24 burst clocks
  * (3 us @ 8 MHz); each loop iteration is a few CPU cycles at 16 MHz, so 400
@@ -122,9 +136,22 @@
 /* BUSY (P1.5): reads nonzero while a conversion is in progress. */
 #define ADC_BUSY()          (P1IN & BIT5)
 
-/* LaunchPad LEDs: LED1 (red, P1.0) = heartbeat, LED2 (green, P4.6) = error. */
+/* LaunchPad LEDs. The board's two user-interface clusters sit on opposite
+ * ports (SLAU535B schematic, p. 37): the left one is button S1 (P4.5) beside
+ * LED1, RED, on P4.6; the right one is button S2 (P1.1) beside LED2, GREEN,
+ * on P1.0. This firmware uses the green LED2 as the heartbeat (0.5 Hz while
+ * idle, 1 Hz while streaming) and the red LED1 as the latched error light. */
 #define LED_HEART_TOGGLE()  (P1OUT ^= BIT0)
 #define LED_ERR_ON()        (P4OUT |= BIT6)
 #define LED_ERR_OFF()       (P4OUT &= (uint8_t)~BIT6)
+
+/* LaunchPad push buttons: S1 = P4.5 (left), S2 = P1.1 (right). Both switch
+ * the pin to GND when pressed and float otherwise, so clocks.c enables the
+ * internal PULL-UP on each and "pressed" reads as a LOW level - hence the
+ * inverted tests below. Either button starts streaming; the firmware never
+ * needs to tell them apart. */
+#define BTN_S1_DOWN()       ((P4IN & BIT5) == 0u)
+#define BTN_S2_DOWN()       ((P1IN & BIT1) == 0u)
+#define BTN_ANY_DOWN()      (BTN_S1_DOWN() || BTN_S2_DOWN())
 
 #endif /* BOARD_H */

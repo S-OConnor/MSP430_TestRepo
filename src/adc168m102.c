@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include "board.h"
 #include "spi.h"
 #include "adc168m102.h"
@@ -129,8 +130,8 @@ static void write_word(uint16_t w)
 }
 
 /*
- * Read one 16-bit register back (only used for the init link check, while
- * SR is still 0 so the reply is a single 20-clock frame).
+ * Read one 16-bit register back (used by adc168_config_cycle() only, i.e.
+ * while SR is still 0 so the reply is a single 20-clock frame).
  *
  * After a "read register" command (A=0001 etc.), the ADC presents the value
  * during the NEXT access: RD pulse, then the frame arrives as
@@ -151,11 +152,66 @@ static uint16_t read_word(void)
                       ((uint16_t)b2 >> 6));             /* d1..d0   */
 }
 
+/*
+ * One CONFIG write + read-back exchange — the "is the link still there?"
+ * probe, used both once at init and repeatedly (once a second) by the idle
+ * phase while the firmware waits for a button press.
+ *
+ * It writes ADC168_W_LINKCHK: the mode bits we care about plus A=0001,
+ * "present CONFIG on SDOA at the next read access", then fetches the reply.
+ * Note SR=0 in that word, so the reply is the simple single-frame kind AND
+ * the part is left NOT configured for streaming — which is exactly why
+ * adc168_start_stream() below must run before the first real sample.
+ *
+ * On the scope this is a compact, unmistakable signature: two RD pulses with
+ * 24 clocks each and ~1 s of dead bus either side.
+ */
+uint16_t adc168_config_cycle(void)
+{
+    write_word(ADC168_W_LINKCHK);
+    s_link_readback = read_word();
+    return s_link_readback;
+}
+
+/*
+ * Does a CONFIG read-back look like the word we just wrote?
+ *
+ * Bits 11:4 carry PD=00, FE=0, SR=0, FC=0, PDE=1, CID=0, CE=0 -> 0x04. A
+ * dead SDOA line (all 0s or all 1s) fails this, as does a clock-phase or
+ * strobe fault that slides the frame by a bit.
+ */
+bool adc168_config_ok(uint16_t raw)
+{
+    return (((raw >> 4) & 0xFFu) == 0x04u);
+}
+
+/*
+ * Leave the config-probe state and arm continuous acquisition.
+ *
+ * Writes the real operating CONFIG (R=01 rewrite, SR=1 both frames per RD,
+ * PDE=1, C=ADC_PAIR), then burns two complete conversion+read cycles because
+ * SR/PDE/CID edits only take effect "from the next conversion with a delay of
+ * one read access" (§6.5.2.2). Without that flush the first samples would be
+ * read with the old SR=0 framing and fail the frame check.
+ *
+ * Called at the end of init and again every time the idle phase hands over to
+ * streaming — the idle probe leaves SR=0 behind, so this is not optional.
+ */
+void adc168_start_stream(void)
+{
+    int16_t d0, d1;
+    uint8_t i;
+
+    write_word(ADC168_W_CONFIG);
+
+    for (i = 0; i < 2; i++) {
+        (void)adc168_read(&d0, &d1);
+    }
+}
+
 uint8_t adc168_init(void)
 {
     uint8_t status = 0;
-    int16_t d0, d1;
-    uint8_t i;
 
     /* Assert ~CS once and leave it low: SDI/RD become live, SDOA drives. */
     ADC_CS_LOW();
@@ -172,17 +228,9 @@ uint8_t adc168_init(void)
      * we just wrote (bits 11:4 must read PD=00,FE=0,SR=0,FC=0,PDE=1,CID=0,
      * CE=0 = 0x04). Done while SR is still 0 so the reply framing is the
      * simple single-frame kind. A dead MISO line (0x0000/0xFFFF) fails this. */
-    write_word(ADC168_W_LINKCHK);
-    s_link_readback = read_word();
-    if (((s_link_readback >> 4) & 0xFFu) != 0x04u) {
+    if (!adc168_config_ok(adc168_config_cycle())) {
         status |= ST_ADC_NOLINK;
     }
-
-    /* Real operating configuration: R=01 (rewrite whole register),
-     * SR=1 (both frames per RD pulse), PDE=1 (pseudo-differential inputs),
-     * CID=0 (keep indicator bits — our per-frame validation), C=ADC_PAIR
-     * (the first conversion is already the pair we stream). */
-    write_word(ADC168_W_CONFIG);
 
     /* --- Reference bring-up ----------------------------------------------
      * The two internal 2.5 V reference DACs power up DISABLED (REFDACx
@@ -208,14 +256,11 @@ uint8_t adc168_init(void)
      * capacitors. Wait 10 ms of CPU cycles before trusting conversions. */
     __delay_cycles(MCLK_HZ / 100uL);
 
-    /* Mode-change pipeline flush: SR/PDE/CID edits take effect "from the
-     * next conversion with a delay of one read access" (§6.5.2.2). Burn two
-     * complete conversion+read cycles so the streaming loop only ever sees
-     * settled SR=1 framing. Each of them also re-commands ADC_PAIR, so the
-     * mux is primed for the first real sample. */
-    for (i = 0; i < 2; i++) {
-        (void)adc168_read(&d0, &d1);
-    }
+    /* Write the real operating CONFIG and flush the mode-change pipeline.
+     * main() calls this again on the button press; init just leaves the part
+     * in the same armed state, so a build that skipped the idle phase behaves
+     * identically to one that sat in it for an hour. */
+    adc168_start_stream();
 
     return status;
 }

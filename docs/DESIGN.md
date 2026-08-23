@@ -86,12 +86,32 @@ during the 40-clock readout burst that follows every tick. The firmware's only
 job is to run that bus traffic reliably at 99.902 Hz and to flag trouble on
 two LEDs.
 
+**Acquisition does not start by itself.** Out of reset the firmware sits in an
+**idle phase**: once a second it writes the ADC's CONFIG register with the
+"read it back" action and reads the reply — one register write, one register
+read, no conversions, and nothing asked of the analog front end. Pressing
+either LaunchPad button (**S1** = P4.5 or **S2** = P1.1) rewrites the operating
+CONFIG and switches to the **streaming phase**: one conversion + readout every
+tick, for good. The heartbeat LED distinguishes them — a 0.5 Hz blink while
+idle, 1 Hz while streaming.
+
+That split exists because the two phases fail in different ways and are
+diagnosed differently. The idle phase exercises exactly the digital path —
+~CS, RD, CLOCK, SDI, SDOA — at a rate a human can watch on a scope, while
+supplies, jumper wires and references can still be moved; a mis-wired board
+says so once a second instead of once. The streaming phase is the measurement
+itself, and starting it deliberately means nothing is converting while the
+analog side is still being probed. [§4](#4-runtime-behaviour) has the state
+machine; [§12](#12-timing-the-100-hz-tick) covers the timebase both phases
+share.
+
 ```mermaid
 flowchart LR
     AIN["2 analog inputs<br/>CHA1 = EVM J2.5<br/>CHB1 = EVM J1.5<br/>0..5 V each"]
     PWR["bench supplies<br/>+5 V, +3.3 V, +/-8 V"]
     XTAL["external 32.768 kHz<br/>square wave"]
     USB["USB<br/>power + mspdebug flash"]
+    BTN["S1 (P4.5) / S2 (P1.1)<br/>LaunchPad buttons"]
 
     subgraph EVM["ADC168M102R-SEP EVM"]
         ADC["ADC168M102R<br/>2 converters, Mode II"]
@@ -107,6 +127,7 @@ flowchart LR
     PWR --> ADC
     XTAL -->|LFXIN bypass| MCU
     USB --> MCU
+    BTN -->|"press: idle -> streaming"| MCU
 
     MCU -->|"CLOCK, SDI"| ADC
     MCU -->|"CONVST, RD, ~CS"| ADC
@@ -114,8 +135,8 @@ flowchart LR
     ADC -->|BUSY| MCU
 
     ADC -.->|"SDOA carries both 16-bit<br/>results once per tick"| SCOPE
-    MCU --> LED1["LED1 red: heartbeat"]
-    MCU --> LED2["LED2 green: error"]
+    MCU --> LEDH["LED2 green, P1.0: heartbeat<br/>0.5 Hz idle / 1 Hz streaming"]
+    MCU --> LEDE["LED1 red, P4.6: error"]
 ```
 
 ## 2. Key design decisions
@@ -126,10 +147,12 @@ flowchart LR
 | ADC operating mode | Mode II (M0 strapped low), special-read (SR=1), pseudo-differential (PDE=1) | Mode II = M0 0, M1 1: manual channel select, SDOA only *(ADC Table 6-5, p. 21)*. With SR=1 one RD strobe + 40 clocks returns both converters' results *(ADC §6.5.2.3, p. 27)* — exactly the two channels wanted — so a tick is a single conversion. The internal 2.5 V reference is routed as common mode by software, so the EVM needs no jumper changes. |
 | Input mux | Pseudo-differential **4:1** configuration (`PDE=1`, ADC Table 6-2, p. 17), channel picked by CONFIG `C[1:0]` | Gives four single-ended inputs per converter measured against a common mode, which is what this application wants. `M0 = 0` keeps selection *manual* through `C[1:0]`; the SEQFIFO sequencer applies only to automatic mode (`M0 = 1`) *(ADC §6.3.2.1, p. 21)* and is left at its reset default. |
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
+| Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
+| Button input | S1 (P4.5) and S2 (P1.1), internal pull-ups, **polled** once per tick with a 2-poll (20 ms) debounce — no port interrupt | The CPU already wakes every 10 ms, so the poll is free and the tick spacing *is* the debounce: no second timer, no ISR firing a dozen times inside one contact bounce. Both buttons do the same thing, so the firmware never has to tell them apart. The LaunchPad wires each switch straight to GND with no external pull-up *(LP schematic, p. 37)*, hence `PxREN` + `PxOUT = 1` and active-low sensing. |
 | Sample timebase | External 32.768 kHz square wave into LFXIN (bypass) → Timer_A0, period 328 → 99.902 Hz | User requirement (external low-frequency source). LFXT bypass accepts a 10.5–50 kHz digital square wave at 30–70 % duty *(MCU p. 26)*. 100.000 Hz is not an integer division of 32768; 328 is the closest. |
 | Fallback | If the 32 kHz source is missing: internal DCO timer at exactly 100 Hz, status flag set | Never hang; make the degraded state visible on the error LED and in `g_status`. |
 | Readout | None from the MCU — the ADC bus itself is the measurement point | The scope has to be on the bus during bring-up anyway, and SDOA already carries both results in full 16-bit resolution. Dropping the UART removes a peripheral, an ISR, a 256-byte buffer and a whole class of "did the host keep up?" failure from the tick path. |
-| Status reporting | Two LEDs, plus every computed value held in a `volatile` global for the debugger | Enough to tell "alive and ticking" from "something is wrong" at a glance; `mspdebug` supplies the detail when the LED says to look. |
+| Status reporting | Two LEDs, plus every computed value held in a `volatile` global for the debugger | Enough to tell "alive and ticking" from "something is wrong" at a glance — and, because the heartbeat rate doubles at the phase change, which phase the board is in; `mspdebug` supplies the detail when the LED says to look. |
 | Integrity | Every ADC frame carries fixed indicator/zero bits which are checked on every read *(ADC Figure 6-7, p. 27)* | Cheap, continuous self-test of wiring and clock phase; failures are counted in the `errs` column and light the error LED. |
 | Toolchain | TI msp430-gcc via CMake cross file; Docker/Podman dev image | Reproducible builds on any host; no IDE dependency. |
 
@@ -142,14 +165,15 @@ src/
 ├── clocks.c/.h    GPIO setup, LPM5 unlock, FRAM wait state, DCO/LFXT clocks
 ├── spi.c/.h       eUSCI_B0 SPI master, blocking byte exchange
 ├── adc168m102.c/.h ADC driver: init sequence, conversion + readout
-└── main.c         tick timer, sample loop, LEDs, observable globals
+└── main.c         phase state machine, tick timer, button poll,
+                   sample loop, LEDs, observable globals
 ```
 
 Layering (arrows = "uses"):
 
 ```mermaid
 flowchart TD
-    main["main.c<br/>tick timer, sample loop,<br/>LEDs, observable globals"]
+    main["main.c<br/>phase state machine, tick timer,<br/>button poll, sample loop,<br/>LEDs, observable globals"]
     clocks["clocks.c/.h<br/>GPIO, LPM5 unlock,<br/>FRAM wait state, DCO/LFXT"]
     adc["adc168m102.c/.h<br/>init sequence,<br/>conversion + readout"]
     spi["spi.c/.h<br/>eUSCI_B0 SPI master,<br/>blocking byte exchange"]
@@ -173,23 +197,45 @@ flowchart TD
     CLK --> LFXT{"external 32 kHz<br/>alive?"}
     LFXT -->|yes| SPI
     LFXT -->|"no (bounded retry)"| FB["tick from DCO at 100 Hz<br/>g_status: ST_NO_LFXT set<br/>error LED on"] --> SPI
-    SPI["init eUSCI_B0 SPI"] --> AINIT["ADC reset / config /<br/>CONFIG readback link check"]
+    SPI["init eUSCI_B0 SPI"] --> AINIT["ADC reset / CONFIG readback link check /<br/>references / arm streaming"]
     AINIT --> OK{"readback mode bits<br/>11:4 == 0x04?"}
     OK -->|yes| T0
     OK -->|no| NOLINK["g_status: ST_ADC_NOLINK set<br/>error LED on, keep running"] --> T0
-    T0["start Timer_A0"] --> SLEEP
+    T0["start Timer_A0<br/>g_phase = PHASE_IDLE"] --> SLEEP
 
-    SLEEP["sleep in LPM0"] -->|"timer ISR every ~10 ms:<br/>set flag, wake CPU"| READ
-    READ["adc168_read:<br/>CONVST, 24 clocks,<br/>wait BUSY low, RD,<br/>40 clocks, parse + validate"] --> VALID{"frame valid?"}
+    SLEEP["sleep in LPM0"] -->|"timer ISR every ~10 ms:<br/>set flag, wake CPU"| PHASE{"g_phase?"}
+
+    PHASE -->|idle| BTN{"S1 or S2 low on<br/>2 consecutive polls?"}
+    BTN -->|yes| ARM["adc168_start_stream:<br/>write operating CONFIG,<br/>2 flush conversions<br/>g_phase = PHASE_STREAM"] --> SLEEP
+    BTN -->|no| NTH{"100th tick<br/>since last probe?"}
+    NTH -->|no| SLEEP
+    NTH -->|yes| PROBE["adc168_config_cycle:<br/>write 0x1041, RD, read 3 bytes"] --> CFGOK{"readback<br/>mode bits ok?"}
+    CFGOK -->|yes| IDLED
+    CFGOK -->|no| CFGERR["g_err_cfg++<br/>latch error LED"] --> IDLED
+    IDLED["publish g_cfg / g_cfg_cycles<br/>heartbeat LED toggles<br/>once per probe = 0.5 Hz"] --> SLEEP
+
+    PHASE -->|streaming| READ["adc168_read:<br/>CONVST, 24 clocks,<br/>wait BUSY low, RD,<br/>40 clocks, parse + validate"]
+    READ --> VALID{"frame valid?"}
     VALID -->|yes| PUB["publish g_sample_a / g_sample_b / g_tick"]
     VALID -->|no| ERR["both samples = -32768<br/>g_err_frame / g_err_busy++<br/>latch error LED"] --> PUB
     PUB --> LEDS["heartbeat LED toggles<br/>every 50 ticks = 1 Hz"] --> SLEEP
 ```
 
-The scope sees one ~20 µs burst per tick, 10 ms apart.
+Both phases run off the same ~100 Hz tick; only what a tick *does* changes.
+While idle the scope sees two 24-clock register accesses once a second and a
+dead bus in between; after the button press it sees one ~20 µs acquisition
+burst per tick, 10 ms apart.
 
-Per-tick budget: ~20 µs on the ADC bus plus a few µs of bookkeeping, then the
-CPU sleeps. CPU utilisation is well under 1 %.
+The hand-over tick is the only unusual one: it writes the operating CONFIG and
+burns two throw-away conversions (~50 µs, still well inside the 10 ms budget)
+before the first real sample lands on the *next* tick. That step is mandatory,
+not cosmetic — the idle probe leaves `SR = 0` in CONFIG, so without the rewrite
+the first readouts would arrive in the wrong framing and fail the frame check
+([§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming)).
+
+Per-tick budget: ~20 µs on the ADC bus plus a few µs of bookkeeping while
+streaming (~6 µs once a second while idle), then the CPU sleeps. CPU
+utilisation is well under 1 % in either phase.
 
 ---
 
@@ -475,7 +521,19 @@ each pin's `PxSEL1`/`PxSEL0` encodings.
 | P4.2 | GPIO output | RD (11) | Table 6-58, p. 101 |
 | P1.5 | GPIO input, pulldown | BUSY (5) | Table 6-50, p. 88 |
 | PJ.4 | LFXIN | external 32.768 kHz | Table 6-60, p. 106 |
-| P1.0 / P4.6 | GPIO | LEDs (heartbeat / error) | Tables 6-49, p. 86 / 6-59, p. 103 |
+| P1.0 / P4.6 | GPIO output | LEDs, on the LaunchPad (heartbeat / error) | Tables 6-49, p. 86 / 6-59, p. 103 |
+| P4.5 | GPIO input, pull-up | button S1, on the LaunchPad | Table 6-59, p. 103 |
+| P1.1 | GPIO input, pull-up | button S2, on the LaunchPad | Table 6-49, p. 86 |
+
+The last three rows need no wiring: the LEDs and both buttons are on the
+LaunchPad itself *(LP schematic, p. 37)*. The buttons short their pin to
+ground when pressed and float otherwise, so `clocks.c` enables each pin's
+internal resistor as a **pull-up** (`PxDIR = 0`, `PxREN = 1`, `PxOUT = 1`) and
+a press reads as a low level. The LaunchPad's own naming is worth keeping
+straight, because the two user-interface clusters are on opposite ports: the
+left cluster is **S1 (P4.5) + LED1, red (P4.6)**; the right is **S2 (P1.1) +
+LED2, green (P1.0)**. This firmware uses the green LED as the heartbeat and
+the red one as the error light.
 
 The two analog inputs are not MSP430 pins at all — they go straight into
 the EVM's op-amp buffers on its own headers *(EVM §2.2 and Figure 2-3, p. 5)*:
@@ -708,17 +766,25 @@ CONFIG word carrying the address, then the value — illustrated in
 ```
  1. ~CS low                       enable the interface, stays low forever
  2. write 0x0004                  soft reset (A=0100): everything to defaults
- 3. write 0x1041                  R=01, PDE=1, A=0001 -> "send CONFIG back"
- 4. RD + read 3 bytes             the readback arrives; check bits 11:4 == 0x04
-                                  (PDE=1, all else 0). Wrong -> ST_ADC_NOLINK.
- 5. write 0x5140                  R=01, SR=1, PDE=1, CID=0, C=01 (real config;
-                                  C = ADC_PAIR, so conversion 1 is pair 1)
- 6. write 0x1142 then 0x03FF      REFDAC1 <- enable, 2.5 V
- 7. write 0x1145 then 0x03FF      REFDAC2 <- enable, 2.5 V
- 8. write 0x114C then 0xFF00      REFCM   <- all channels use REFIO1 as common mode
- 9. wait 10 ms                    reference capacitors settle (t_REFON = 8 ms)
-10. two throw-away conversions    flush the "one read access late" pipeline
+ 3. write 0x1041                  R=01, PDE=1, A=0001 -> "send CONFIG back"   \ adc168_
+ 4. RD + read 3 bytes             the readback arrives; check bits 11:4 == 0x04 > config_
+                                  (PDE=1, all else 0). Wrong -> ST_ADC_NOLINK. / cycle()
+ 5. write 0x1142 then 0x03FF      REFDAC1 <- enable, 2.5 V
+ 6. write 0x1145 then 0x03FF      REFDAC2 <- enable, 2.5 V
+ 7. write 0x114C then 0xFF00      REFCM   <- all channels use REFIO1 as common mode
+ 8. wait 10 ms                    reference capacitors settle (t_REFON = 8 ms)
+ 9. write 0x5140                  R=01, SR=1, PDE=1, CID=0, C=01 (real config;  \ adc168_
+                                  C = ADC_PAIR, so conversion 1 is pair 1)      > start_
+10. two throw-away conversions    flush the "one read access late" pipeline     / stream()
 ```
+
+Steps 3–4 and steps 9–10 are the two reusable halves, and `main()` calls both
+of them again at runtime: the probe once a second while idle, the arming pair
+once when a button is pressed ([§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming)).
+Note that the operating word is written *after* the reference registers, not
+before: the REFDAC/REFCM pointer words are themselves CONFIG writes carrying
+the same mode bits (`R=01`, `SR=1`, `PDE=1`) with `C=00`, so nothing converts
+while they are in flight and step 9 is what finally installs `C = ADC_PAIR`.
 
 Sources for each step: soft reset *(ADC §6.4.1.4, p. 23; A = 0100 in
 Table 7-2, p. 34)*; CONFIG readback action *(ADC Table 7-2, p. 34)*; the
@@ -747,13 +813,14 @@ sequenceDiagram
     else mismatch (open wire / unpowered / wrong strap)
         Note over M: g_status = ST_ADC_NOLINK,<br/>raw value parked in g_cfg,<br/>error LED on before the first tick
     end
-    M->>A: write 0x5140  — R=01, SR=1, PDE=1, C=ADC_PAIR
     M->>A: write 0x1142 then 0x03FF — REFDAC1 on, 2.5 V
     M->>A: write 0x1145 then 0x03FF — REFDAC2 on, 2.5 V
     M->>A: write 0x114C then 0xFF00 — REFCM: all channels use REFIO1
     Note over M,A: wait 10 ms — reference caps settle (t_REFON = 8 ms)
+    M->>A: write 0x5140  — R=01, SR=1, PDE=1, C=ADC_PAIR
     M->>A: two throw-away conversions
     A-->>M: discarded (flushes the "one read access late" pipeline)
+    Note over M: init leaves the part armed;<br/>main() then idles in the probe phase<br/>until a button is pressed
 ```
 
 Step 4 is the **link check**: if MISO is dead (open wire, ADC unpowered,
@@ -761,15 +828,17 @@ wrong strap) we read all-zeros or all-ones and the mode bits will not
 match — the firmware then sets `ST_ADC_NOLINK`, lights the error LED before
 the first tick, and parks the raw value in `g_cfg` for the debugger. Note
 that `g_cfg` is the *link-check* readback (expected `0x1041`), captured at
-step 4 — before the operating word of step 5 is written, so it does not
-carry the channel selection.
+step 4 — before the operating word of step 9 is written, so it does not
+carry the channel selection. Every idle-phase probe overwrites `g_cfg` with
+a fresh copy of the same readback, so it always reflects the most recent
+exchange rather than only the one at power-on.
 
-Steps 6–8 matter because the internal references are **off by default** —
+Steps 5–7 matter because the internal references are **off by default** —
 REFDAC1/REFDAC2 reset to `0x07FF`, which has the power-down bit set
 *(ADC Figures 7-4/7-5, p. 36)* — so without them the ADC would convert against
-nothing. Step 8 is what makes the pseudo-differential 4:1 configuration usable:
+nothing. Step 7 is what makes the pseudo-differential 4:1 configuration usable:
 the `CMxx` bits choose the *internal* reference over the external CMA/CMB pins,
-and the `Rxx` bits choose REFIO1 (the 2.5 V DAC from step 6) over REFIO2
+and the `Rxx` bits choose REFIO1 (the 2.5 V DAC from step 5) over REFIO2
 *(ADC Table 7-7, pp. 40–41; block diagram in §6.3.1, p. 20)*. Writing `0xFF00`
 arms all eight channels even though only two are read — it costs one word and
 keeps `ADC_PAIR` a one-line change. Doing it in firmware is also why the EVM's
@@ -870,6 +939,38 @@ sequenceDiagram
 Total: ~64 clocks ≈ 8 µs of bus time plus a few µs of overhead — about
 20 µs, and that is the entire ADC workload of a tick.
 
+### 10.4 The idle probe and the hand-over to streaming
+
+Before any of that happens, the firmware spends its time in the idle phase,
+where the only ADC traffic is the pair of register accesses already described
+as the init link check. Two driver entry points cover it:
+
+| Function | What it does on the bus | Leaves CONFIG as |
+|---|---|---|
+| `adc168_config_cycle()` | `write_word(0x1041)` then `read_word()` — RD pulse + 24 clocks, twice | `SR = 0`, `C = 00`, PDE=1 (the probe word) |
+| `adc168_start_stream()` | `write_word(0x5140)`, then two complete conversion + readout cycles | `SR = 1`, `C = ADC_PAIR` (the operating word) |
+
+`adc168_config_cycle()` returns the raw readback; `adc168_config_ok()` applies
+the same bits-11:4 test the init link check uses. `main()` calls the probe
+every hundredth tick, publishes the result in `g_cfg`, counts the probe in
+`g_cfg_cycles`, and counts failures in `g_err_cfg` — a probe that comes back
+wrong latches the error LED exactly like a bad frame does while streaming.
+
+**Why the hand-over cannot be skipped.** The probe word `0x1041` has `SR = 0`,
+because a register readback wants the simple single-frame reply. Acquisition
+needs `SR = 1` so that one RD pulse streams both converters' frames. So the
+idle phase necessarily leaves the part in the *wrong* mode for sampling, and
+the button press has to put it back: write `0x5140`, then burn two conversions
+because `SR`/`PDE`/`CID` edits only take effect "from the next conversion with
+a delay of one read access" *(ADC §6.5.2.2, p. 26)*. Without that flush the
+first readouts would be parsed with the old framing and fail the fixed-bit
+check — visible as `g_err_frame` jumping by one or two at the moment of the
+press, rather than as anything subtler.
+
+The same function ends `adc168_init()`, so a board that is flashed, pressed
+immediately, and a board that sat idle for an hour enter streaming from
+byte-identical register state.
+
 ---
 
 ## 11. Reading two channels: why a pair
@@ -955,6 +1056,31 @@ Fallback: if the external oscillator is absent, the timer runs from
 SMCLK/8 = 1 MHz with a period of 10 000 → exactly 100 Hz, but only as
 accurate as the DCO (~±2 %). `g_status` bit 0x01 reports this.
 
+### One timebase, two phases
+
+The tick keeps running at ~100 Hz in the idle phase as well; the phase only
+decides what a tick *does*. Everything the firmware times is then a count of
+ticks off that one timer:
+
+| Interval | Ticks | Constant (`board.h`) | Value |
+|---|---|---|---|
+| Sample period (streaming) | 1 | `TICK_PERIOD_ACLK` | 10.010 ms |
+| Config probe period (idle) | 100 | `IDLE_CONFIG_TICKS` | ~1.0 s |
+| Button debounce | 2 | `BTN_DEBOUNCE_POLLS` | ~20 ms |
+| Heartbeat toggle (streaming) | 50 | — | 1 Hz blink |
+| Heartbeat toggle (idle) | 100 | one per probe | 0.5 Hz blink |
+
+That is why the button needs no timer, no ISR and no interrupt of its own:
+the pin is sampled on a tick edge that already exists, and requiring two
+consecutive low reads means the contact must be stable for ≥ 10 ms — longer
+than these tact switches bounce, and far shorter than any press a human can
+make. A press is therefore never missed and never counted twice.
+
+The idle phase's 1 s period is a *human* timebase, not a measurement one:
+it wants to be slow enough to watch on a scope and to leave the bus obviously
+quiet in between, so its accuracy does not matter — in the no-LFXT fallback it
+becomes 1.000 s ± 2 % and nothing cares.
+
 ---
 
 ## 13. Putting it together: one tick, start to finish
@@ -982,6 +1108,39 @@ sequenceDiagram
 
 CPU is awake well under 1 % of the time, and the bus is idle for 99.8 % of
 each tick — which is why a single-shot trigger on CONVST is unambiguous.
+
+### The other two kinds of tick
+
+Before the button press, the same machinery runs a much smaller errand — and
+99 ticks out of 100 it is not an errand at all:
+
+```mermaid
+sequenceDiagram
+    participant T as Timer_A0 ISR
+    participant L as main loop
+    participant D as adc168_config_cycle
+    participant B as ADC bus (scope)
+    participant G as observable globals
+
+    Note over L: sleeping in LPM0
+    T->>L: CCR0 interrupt: wake CPU
+    L->>L: poll S1 / S2 (~1 µs)
+    alt not a probe tick (99 of every 100)
+        Note over L: back to LPM0 — bus stays silent
+    else 100th tick
+        L->>D: adc168_config_cycle()
+        D->>B: RD + 24 clocks (write 0x1041),<br/>RD + 24 clocks (read reply)
+        B-->>D: CONFIG readback
+        D-->>L: raw word (~6 µs later)
+        L->>G: publish g_cfg, g_cfg_cycles,<br/>g_err_cfg if the check fails
+        Note over L: heartbeat toggles, back to LPM0
+    end
+```
+
+And once, on the tick where the debounced press lands, a third kind: write
+`0x5140`, two flush conversions, `g_phase = PHASE_STREAM`, `g_tick = 0`, back
+to sleep — ~50 µs, no sample published. The first acquisition burst appears on
+the *next* tick, 10 ms later.
 
 ---
 
@@ -1012,16 +1171,34 @@ SPI decoder set to CPOL=0/CPHA=1, MSB first, will give you the five readout
 bytes directly; [§15](#15-number-formats-decoding-a-readout-burst-by-hand)
 turns them into numbers.
 
-**What the LEDs tell you.** The LaunchPad wires LED1 to P1.0 and LED2 to P4.6
-*(LP schematic, p. 37)*. LED1 (red, P1.0) toggles every 50 ticks, so a
-steady 1 Hz blink means the loop is running at the right rate — and it
-doubles as a free 1 Hz timebase reference on the scope. LED2 (green, P4.6)
-latches on if init failed or any frame has ever failed validation.
+**Nothing on the bus? Press a button.** Out of reset the board is in the idle
+phase, and its signature is deliberately different: no CONVST edge at all,
+BUSY flat low, and two 24-clock register accesses about a second apart —
+`0x10 0x41 0x00` going out on SDI, `0x04 0x10 0x40` coming back on SDOA. If
+that is what the scope shows, the firmware is healthy and simply waiting;
+press S1 (P4.5) or S2 (P1.1) and the trace switches to one acquisition burst
+every 10 ms. Trigger the idle phase on RD (J5.11) rather than CONVST, since
+CONVST never moves until streaming starts.
+
+**What the LEDs tell you.** The LaunchPad's two user-interface clusters sit on
+opposite ports: LED1 (red) on P4.6 next to button S1 (P4.5), and LED2 (green)
+on P1.0 next to button S2 (P1.1) *(LP schematic, p. 37)*. This firmware uses
+the **green** LED (P1.0) as the heartbeat and the **red** one (P4.6) as the
+error light.
+
+The heartbeat is also the phase indicator, because its rate doubles at the
+hand-over: one toggle per probe while idle (0.5 Hz blink), one every 50 ticks
+while streaming (1 Hz blink, and a free 1 Hz timebase reference on the scope).
+So a glance at it answers both "is the loop running at the right rate?" and
+"has acquisition started?". The red LED latches on if init failed, if an idle
+probe came back wrong, or if any frame has ever failed validation.
 
 **What the debugger tells you.** Every value the firmware computes lives in
 a `volatile` global, so halting the target with `mspdebug` and dumping them
-is the fallback for anything the scope cannot show: `g_sample_a`,
-`g_sample_b`, `g_tick`, `g_err_frame`, `g_err_busy`, `g_status`, `g_cfg`.
+is the fallback for anything the scope cannot show: `g_phase` (0 = idle,
+1 = streaming), `g_sample_a`, `g_sample_b`, `g_tick` (samples since streaming
+started), `g_err_frame`, `g_err_busy`, `g_status`, `g_cfg`, `g_cfg_cycles`
+and `g_err_cfg`.
 
 ---
 
@@ -1062,21 +1239,31 @@ hangs and never stops ticking.
 |---|---|---|
 | External 32 kHz absent | Oscillator fault flag never clears (bounded retry) | Switch tick timer to DCO, set `ST_NO_LFXT` (0x01), error LED |
 | ADC not wired / unpowered / wrong strap | CONFIG readback mismatch at init | Set `ST_ADC_NOLINK` (0x02) and light the error LED *before the first tick*; raw readback kept in `g_cfg`; keep running |
+| Link lost *after* init (wire pulled, EVM powered down) | Idle-phase CONFIG probe mismatch, checked once a second | `g_err_cfg` incremented, error LED latched, `g_cfg` holds the bad readback; probing continues |
 | Conversion never completes | BUSY still high after timeout | Both channels set to −32768, `g_err_busy` incremented, error LED latched |
 | Bit misalignment on the bus | Frame indicator/zero bits wrong | Both channels set to −32768, `g_err_frame` incremented, error LED latched |
 
 ### 16.1 From symptom to cause
 
-The error LED (green, P4.6) is the only "something is wrong" signal. To find
+The error LED (red, P4.6) is the only "something is wrong" signal. To find
 out *what*, halt the target and read the globals — `mspdebug` then
-`md &g_status`, `g_cfg`, `g_err_frame`, `g_err_busy`, `g_sample_a/b`, `g_tick`.
+`md &g_status`, `g_phase`, `g_cfg`, `g_err_cfg`, `g_err_frame`, `g_err_busy`,
+`g_sample_a/b`, `g_tick`.
+
+Start at the heartbeat, which now answers two questions at once: whether the
+tick is running, and which phase it is in.
 
 ```mermaid
 flowchart TD
-    START([something looks wrong]) --> HB{"heartbeat LED<br/>blinking at 1 Hz?"}
+    START([something looks wrong]) --> HB{"heartbeat LED<br/>(green, P1.0)?"}
 
-    HB -->|no| NOTICK["tick not running:<br/>check the 32 kHz source,<br/>halt and read g_tick"]
-    HB -->|yes| ERRLED{"error LED on?"}
+    HB -->|dark| NOTICK["tick not running:<br/>check the 32 kHz source,<br/>halt and read g_tick"]
+    HB -->|"blinking 0.5 Hz"| IDLE["still in the idle phase —<br/>no conversions yet by design.<br/>Press S1 (P4.5) or S2 (P1.1);<br/>the blink should double"]
+    HB -->|"blinking 1 Hz"| ERRLED{"error LED on?"}
+
+    IDLE --> IDLEERR{"error LED on<br/>while idle?"}
+    IDLEERR -->|no| WAIT["healthy: two 24-clock<br/>register accesses per second<br/>on the bus, nothing else"]
+    IDLEERR -->|yes| CFG["g_status 0x02 or g_err_cfg climbing:<br/>the CONFIG probe is failing.<br/>g_cfg holds the raw readback,<br/>expect 0x1041"]
 
     ERRLED -->|no| DATA{"data on SDOA<br/>look right?"}
     ERRLED -->|yes| STATUS{"read g_status"}
@@ -1087,6 +1274,7 @@ flowchart TD
 
     S0 -->|g_err_frame| FRAME["bit misalignment:<br/>lower ADC_SCLK_DIV in board.h<br/>(risk A in PLAN.md)"]
     S0 -->|g_err_busy| BUSY["conversion never completes:<br/>check CLOCK reaching the ADC<br/>and BUSY wiring"]
+    S0 -->|g_err_cfg| CFG2["idle probes failed earlier;<br/>the LED is latched from then.<br/>Harmless if it stopped climbing"]
 
     DATA -->|"wrong channel"| CHAN["check ADC_PAIR in board.h<br/>and the analog wiring:<br/>CHA1 = J2.5 = frame A,<br/>CHB1 = J1.5 = frame B"]
     DATA -->|"rate slightly off 100 Hz"| RATE["intended: 99.902 Hz.<br/>Change TICK_PERIOD_ACLK<br/>if a different rate is wanted"]
@@ -1101,6 +1289,10 @@ flowchart TD
 | `g_err_frame` climbing, SDOA looks shifted | Clock phase / strobe timing / long jumper wires at 8 MHz | Bad frames rejected and counted | Set `ADC_SCLK_DIV` to 2 or 4 in `board.h` — the ADC accepts down to 0.5 MHz *(ADC §6.3.1.4, p. 19)* (risk A in PLAN.md) |
 | Frame A and frame B swapped, or a signal in neither | Analog wiring | — | CHA1 is EVM **J2** pin 5, CHB1 is **J1** pin 5 (even pins GND) *(EVM Figure 2-3, p. 5)*; check `ADC_PAIR` matches the header pins used |
 | Both channels read ≈ −32768 or ≈ 0 with inputs applied | References not enabled / not settled | — | Check init ran (error LED off), 2.5 V on EVM REFIO test points (settling t_REFON = 8 ms with the EVM's 22 µF caps, *ADC §5.7, p. 10*), ±8 V op-amp supplies present on J3/J4 *(EVM Table 1-1, p. 3)* |
+| No acquisition bursts; heartbeat blinking 0.5 Hz | Working as designed — the board is still in the idle phase | Probes CONFIG once a second, converts nothing | Press S1 (P4.5) or S2 (P1.1). If the blink does not double, halt and read `g_phase` (0 = idle) |
+| Error LED on while idle, `g_err_cfg` climbing | The digital link failed *after* init — a wire pulled loose, EVM powered down, PHI board re-fitted | Keeps probing once a second; nothing converts | Same checks as `g_status = 0x02`; `g_cfg` holds the latest raw readback |
+| `g_err_frame` jumps by 1–2 exactly at the button press, then stops | Mode-change pipeline: the first readouts after arming were framed as `SR = 0` | Those samples rejected, streaming continues correctly | Expected only if the flush was shortened — `adc168_start_stream()` burns two conversions for this reason *(ADC §6.5.2.2, p. 26)* |
+| Pressing a button does nothing | Wrong pin assumption, or the pull-up is not enabled | Stays idle | Confirm S1 = P4.5 / S2 = P1.1 on the board *(LP schematic, p. 37)*; check `P4REN`/`P1REN` setup in `clocks.c`, and that `PM5CTL0 & LOCKLPM5` was cleared |
 | No bus traffic at all; heartbeat LED dark | Tick timer never fires, or the firmware never got past init | — | Confirm the 32 kHz source, then halt with `mspdebug` and read `g_tick` |
 | Rate slightly off 100 Hz | Intended — 32768 has no integer divisor giving 100.000 Hz | Ticks at 99.902 Hz | Change `TICK_PERIOD_ACLK` in `board.h` if a different rate is wanted |
 
@@ -1117,9 +1309,16 @@ flowchart TD
 - **CPOL / CPHA** — SPI clock polarity and phase; decide which clock edge
   moves and samples data.
 - **DCO** — the MSP430's internal RC oscillator.
+- **Debounce** — requiring a switch to read the same level on several
+  consecutive samples before believing it, so the contact's mechanical
+  chatter is not read as many presses. Here: two ticks, 20 ms.
 - **eUSCI** — the MSP430's serial peripheral block; "A" instances do UART,
   "B" instances do SPI/I²C. Only eUSCI_B0 is used here.
 - **FRAM** — ferroelectric RAM; the FR5969's program memory.
+- **Idle phase / streaming phase** — this firmware's two run states, held in
+  `g_phase`. Idle writes and reads back the ADC's CONFIG register once a
+  second and converts nothing; streaming runs one conversion + readout per
+  tick. A button press moves idle → streaming, and only a reset moves back.
 - **Gated / burst clock** — a clock that only toggles when needed and idles
   otherwise; what an SPI master emits.
 - **LFXIN, bypass** — low-frequency crystal input, configured to accept an
@@ -1142,8 +1341,12 @@ flowchart TD
 - **SEQFIFO** — the ADC register holding the automatic-mode channel
   sequencer and FIFO. Unused here (manual selection, `M0 = 0`), left at its
   reset default.
+- **S1 / S2** — the LaunchPad's two push buttons, on P4.5 (left, beside the
+  red LED1) and P1.1 (right, beside the green LED2). Either one starts
+  acquisition; both are active low with the MCU's internal pull-up.
 - **SR (special read)** — config bit making one RD strobe deliver both
-  converters' results.
+  converters' results. Set while streaming, clear during the idle probe —
+  which is why the phase change has to rewrite CONFIG.
 - **Two's complement** — signed binary encoding; 0x8000 = −32768,
   0x7FFF = +32767.
 - **Watchdog (WDT)** — a timer that resets the chip unless periodically
@@ -1211,4 +1414,4 @@ designators are its own — so those come from the two user's guides.
 | EVM | 6 | §2.3 + Figure 2-4, ADC circuit | The whole J5 pinout (SDOA 1, BUSY 5, CLK 7, ~CS 9, RD 11, CONVST 13, SDI 15, M0 17, M1 19); 22 µF on REFIO1/REFIO2; J5 is meant for scope/logic-analyzer probing and an external controller | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§14](#14-getting-at-the-data-the-scope), [§16](#16-what-can-go-wrong-and-how-the-firmware-reacts) |
 | LP | 8 | §2.2.2, Clocking | **Y4 is the populated 32 kHz crystal**; Y1 is an unpopulated 4–24 MHz HF footprint | [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
 | LP | 21 | Figure 15, BoosterPack connector pinout | Which BoosterPack pin each port pin lands on: J4 = pins 1–10 (3V3 1, P4.2 2, P2.6 3, P2.2 7), J5 = pins 11–20 (P1.4 12, P1.5 13, P1.7 14, P1.6 15, GND 20) | [§9.4](#94-wiring) |
-| LP | 37 | Schematic | LED1 on P1.0, LED2 on P4.6; Y4 across PJ.4/PJ.5 | [§9.4](#94-wiring), [§14](#14-getting-at-the-data-the-scope) |
+| LP | 37 | Schematic | Left user-interface cluster: **S1 on P4.5, LED1 (red) on P4.6**; right cluster: **S2 on P1.1, LED2 (green) on P1.0** — both switches to GND with no external pull-up; Y4 across PJ.4/PJ.5 | [§2](#2-key-design-decisions), [§9.3](#93-pin-map), [§9.4](#94-wiring), [§14](#14-getting-at-the-data-the-scope), [§16.2](#162-the-detail-behind-each-leaf) |

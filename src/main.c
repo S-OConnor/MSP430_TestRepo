@@ -20,18 +20,44 @@
  *  on a whole acquisition every time. EXAMPLE_OUTPUTS.md shows the expected
  *  trace and walks a readout burst through to two numbers.
  *
- *  Health is reported on the two LaunchPad LEDs, and every value the firmware
- *  computes stays in a global that a debugger can read (mspdebug: `md &g_...`)
- *  — see the "observable state" block below.
+ *  Health is reported on the two LaunchPad LEDs — the green one (LED2, P1.0)
+ *  is the heartbeat, the red one (LED1, P4.6) the latched error light — and
+ *  every value the firmware computes stays in a global that a debugger can
+ *  read (mspdebug: `md &g_...`) — see the "observable state" block below.
+ *
+ *  Two run phases, and a LaunchPad button moves between them:
+ *
+ *    PHASE_IDLE   (entered at reset) Once a second, write the ADC CONFIG
+ *                 register with the "read it back" action and read the reply
+ *                 - one register write + one register read, nothing else on
+ *                 the bus. This is the bring-up/probe mode: it proves the
+ *                 link is alive at a rate a human can watch, and leaves the
+ *                 analog front end idle. The heartbeat LED toggles once per
+ *                 probe -> a slow 0.5 Hz blink.
+ *
+ *    PHASE_STREAM (entered when S1 or S2 is pressed) The acquisition loop:
+ *                 one conversion + 40-clock readout every tick, ~100 Hz.
+ *                 Heartbeat toggles every 50 ticks -> a 1 Hz blink, visibly
+ *                 twice the idle rate, so the LED alone tells you which
+ *                 phase the board is in.
+ *
+ *  The switch is ONE WAY: once streaming, a further press does nothing (a
+ *  reset returns to idle). Both buttons do the same thing - S1 = P4.5,
+ *  S2 = P1.1, active low, polled every tick, see board.h.
  *
  *  Control flow:
  *    1. Hardware init (watchdog off, clocks, SPI, ADC configuration).
  *    2. Start the tick timer.
- *    3. Loop forever: sleep in LPM0 -> timer interrupt wakes us -> one
- *       conversion + readout -> update LEDs -> back to sleep.
+ *    3. Loop forever: sleep in LPM0 -> timer interrupt wakes us -> do this
+ *       tick's work for the current phase -> update LEDs -> back to sleep.
  *
- *  Timing budget per 10 ms tick: ~20 us of ADC bus traffic, a few us of
- *  bookkeeping. The CPU is awake well under 1 % of the time.
+ *  The 100 Hz tick runs in BOTH phases; only what a tick does changes. That
+ *  keeps one timebase for everything: the sample rate, the 1 s idle period
+ *  (IDLE_CONFIG_TICKS), and the button poll/debounce interval.
+ *
+ *  Timing budget per 10 ms tick: ~20 us of ADC bus traffic while streaming
+ *  (~6 us once a second while idle), a few us of bookkeeping. The CPU is
+ *  awake well under 1 % of the time in either phase.
  * =============================================================================
  */
 
@@ -42,15 +68,51 @@
 
 static volatile int16_t g_sample_a;     /* latest CHA<ADC_PAIR> code          */
 static volatile int16_t g_sample_b;     /* latest CHB<ADC_PAIR> code          */
-static volatile uint32_t g_tick;        /* completed sample count             */
+static volatile uint32_t g_tick;        /* samples since streaming started    */
 static volatile uint16_t g_err_frame;   /* frames that failed the bit check   */
 static volatile uint16_t g_err_busy;    /* conversions where BUSY never fell  */
 static volatile uint8_t g_status;       /* ST_* flags from init               */
 static volatile uint16_t g_cfg;         /* raw CONFIG readback (link check)   */
+static volatile uint16_t g_cfg_cycles;  /* idle-phase config probes done      */
+static volatile uint16_t g_err_cfg;     /* probes whose readback was wrong    */
+static volatile uint8_t g_phase;        /* PHASE_IDLE / PHASE_STREAM          */
 
 /* Set by the timer ISR, consumed by main(). `volatile` because it is written
  * in interrupt context and read in a loop the compiler would otherwise hoist. */
 static volatile bool g_tick_pending;
+
+/* ---- run phases ---------------------------------------------------------
+ * Held in g_phase so a debugger can see which mode the board is in without
+ * timing the LED. */
+
+#define PHASE_IDLE      0u      /* config write+readback once a second       */
+#define PHASE_STREAM    1u      /* conversion + readout every tick           */
+
+/* ---- button poll --------------------------------------------------------
+ * Called once per tick (every ~10 ms) from the idle phase. Returns true on
+ * the tick where a press becomes CONFIRMED - the pin has read low for
+ * BTN_DEBOUNCE_POLLS consecutive polls, i.e. through the contact bounce.
+ *
+ * Polling beats a port interrupt here: the CPU is already awake every 10 ms,
+ * so the poll is free, and the tick spacing IS the debounce - no extra timer,
+ * no ISR that could fire mid-bounce a dozen times.
+ *
+ * The counter saturates rather than wrapping, so holding a button down keeps
+ * returning true; that is harmless because the only caller leaves the idle
+ * phase on the first true and never asks again. */
+static bool button_pressed(void)
+{
+    static uint8_t down_polls;
+
+    if (!BTN_ANY_DOWN()) {
+        down_polls = 0;             /* released (or bounced high): restart */
+        return false;
+    }
+    if (down_polls < BTN_DEBOUNCE_POLLS) {
+        down_polls++;
+    }
+    return (down_polls >= BTN_DEBOUNCE_POLLS);
+}
 
 /* ---- sample tick timer -------------------------------------------------- */
 
@@ -97,6 +159,8 @@ void __attribute__((interrupt(TIMER0_A0_VECTOR))) ta0_ccr0_isr(void)
 int main(void)
 {
     int16_t va, vb;                 /* this tick's pair, before publishing */
+    uint16_t idle_ticks = 0;        /* ticks since the last config probe   */
+    uint16_t cfg;                   /* this probe's raw CONFIG readback    */
 
     /* Stop the watchdog timer. On MSP430 the WDT is RUNNING out of reset and
      * would reset the chip in ~32 ms unless serviced; we do not use it, so
@@ -123,6 +187,11 @@ int main(void)
         LED_ERR_ON();
     }
 
+    /* Start in the probe phase and wait for a human. Nothing converts until
+     * S1 or S2 is pressed, so the analog front end can be probed, jumpered,
+     * or left unpowered while the digital link is verified once a second. */
+    g_phase = PHASE_IDLE;
+
     timer_init(g_status);           /* start the ~100 Hz tick */
 
     for (;;) {
@@ -143,7 +212,47 @@ int main(void)
         g_tick_pending = false;
         __enable_interrupt();
 
-        /* One conversion + readout covers both channels (~20 us). The mux
+        /* ---- idle phase: probe the CONFIG register, watch the buttons ----
+         * Everything here runs at the same 100 Hz tick as streaming; the
+         * button is looked at on every one of them and the ADC is touched
+         * on every hundredth. */
+        if (g_phase == PHASE_IDLE) {
+            if (button_pressed()) {
+                /* Hand over to acquisition. The probes above left SR=0 in
+                 * CONFIG, so this rewrite (and the two flush conversions it
+                 * does) is what makes the very next tick's readout valid. */
+                adc168_start_stream();
+                g_phase = PHASE_STREAM;
+                g_tick = 0;             /* tick counter now means "samples" */
+                continue;               /* first sample lands on the next tick */
+            }
+
+            if (++idle_ticks < IDLE_CONFIG_TICKS) {
+                continue;               /* not a probe tick - back to sleep */
+            }
+            idle_ticks = 0;
+
+            /* One write + one read of the CONFIG register (~6 us of bus
+             * traffic). On a scope: two RD pulses, 24 clocks each, once a
+             * second - and a stuck or mis-wired SDOA shows up immediately as
+             * a bad readback rather than as bad samples later. */
+            cfg = adc168_config_cycle();
+            g_cfg = cfg;
+            g_cfg_cycles++;
+            if (!adc168_config_ok(cfg)) {
+                g_err_cfg++;
+                LED_ERR_ON();
+            }
+
+            /* Heartbeat at the probe rate: one toggle per second = 0.5 Hz
+             * blink, half the streaming rate. The LED is the phase
+             * indicator. */
+            LED_HEART_TOGGLE();
+            continue;
+        }
+
+        /* ---- streaming phase --------------------------------------------
+         * One conversion + readout covers both channels (~20 us). The mux
          * selection never changes, so there is no rotation to keep in step:
          * every access re-commands ADC_PAIR (see adc168_read()).
          *
@@ -167,8 +276,9 @@ int main(void)
         g_sample_b = vb;
         g_tick++;
 
-        /* Heartbeat: toggle every 50 ticks = 1 Hz blink at ~100 Hz tick.
-         * This is the "firmware is alive and ticking at the right rate"
+        /* Heartbeat: toggle every 50 ticks = 1 Hz blink at ~100 Hz tick —
+         * twice the idle-phase rate, so the LED also says which phase this
+         * is. It is the "firmware is alive and ticking at the right rate"
          * signal — and, on a scope, P1.0 is a free 1 Hz timebase reference. */
         if ((g_tick % 50u) == 0u) {
             LED_HEART_TOGGLE();

@@ -11,6 +11,18 @@ returns both — one ADC access per tick, ~20 µs of bus time. To acquire a
 different pair, change `ADC_PAIR` in [src/board.h](src/board.h) (k → CHAk +
 CHBk); nothing else needs editing.
 
+**Acquisition starts on a button press.** Out of reset the firmware sits in an
+idle phase: once a second it writes the ADC's CONFIG register with the "read it
+back" action and reads the reply — a link probe, no conversions, analog front
+end untouched. Pressing **S1 (P4.5)** or **S2 (P1.1)** rewrites the operating
+CONFIG and switches to continuous ~100 Hz acquisition for good (reset to go
+back). The heartbeat LED (green, P1.0) tells the phases apart: 0.5 Hz blink
+idle, 1 Hz blink streaming. Both the idle period and the button debounce come
+off the same 100 Hz tick — `IDLE_CONFIG_TICKS` / `BTN_DEBOUNCE_POLLS` in
+[src/board.h](src/board.h). Full rationale and state machine:
+[docs/DESIGN.md §4](docs/DESIGN.md#4-runtime-behaviour) and
+[§10.4](docs/DESIGN.md#104-the-idle-probe-and-the-hand-over-to-streaming).
+
 **There is no serial output.** Results are read straight off the ADC bus with a
 scope or logic analyzer: SDOA carries both 16-bit results in the 40-clock
 readout burst that ends every tick. Trigger on the CONVST rising edge — it
@@ -41,7 +53,12 @@ simultaneously), and one RD pulse + 40 clocks reads both results on SDOA.
 converter against the common mode; `M0=0` keeps that selection manual, so the
 SEQFIFO sequencer (automatic mode only) stays at its reset default.
 One conversion per tick (~20 µs) covers both channels; the mux selection is a
-compile-time constant, so there is no channel rotation to keep in phase.
+compile-time constant, so there is no channel rotation to keep in phase. The
+idle phase uses the same vocabulary with only two of the lines moving: RD plus
+24 clocks to write `CONFIG = 0x1041`, RD plus 24 clocks to read the reply,
+once a second. Because that probe word carries `SR = 0`, the button press must
+rewrite the operating word (`0x5140`) and flush two conversions before the
+first sample is valid.
 The internal 2.5 V references are enabled at init and routed as the
 pseudo-differential common mode (REFCM register) — no EVM jumper changes.
 Input range per channel: 2.5 V ± 2.5 V → two's-complement codes
@@ -65,6 +82,17 @@ least two grounds):
 | **strap** | | **17 → GND** | **M0 = 0** (M1 stays pulled high → Mode II) |
 
 SDOB (J5.3) and M1 (J5.19) stay unconnected.
+
+Nothing else needs wiring — the buttons and LEDs the firmware uses are on the
+LaunchPad itself. The board's two user-interface clusters sit on opposite
+ports (SLAU535B schematic, p. 37):
+
+| LaunchPad control | Pin | Used for |
+|---|---|---|
+| S1 (left button) | P4.5 | start streaming (internal pull-up, active low) |
+| S2 (right button) | P1.1 | start streaming — identical to S1 |
+| LED1 (red) | P4.6 | error / degraded status, latched |
+| LED2 (green) | P1.0 | heartbeat: 0.5 Hz idle, 1 Hz streaming |
 
 ### Analog inputs
 
@@ -161,27 +189,35 @@ two's-complement result MSB-first, then two zeros. Code → voltage is
 
 | Signal | Meaning |
 |---|---|
-| LED1 (red, P1.0) blinking 1 Hz | ticking at the right rate — also a free 1 Hz scope reference |
-| LED2 (green, P4.6) on | init failed, or a frame/BUSY error has occurred |
+| LED2 (green, P1.0) blinking 0.5 Hz | idle phase — probing CONFIG once a second, waiting for a button |
+| LED2 (green, P1.0) blinking 1 Hz | streaming, ticking at the right rate — also a free 1 Hz scope reference |
+| LED1 (red, P4.6) on | init failed, or a config-probe/frame/BUSY error has occurred |
 
 Halt with `mspdebug` and read the globals for detail: `g_status` (0x01 = no
 external 32 kHz and running the DCO fallback tick, 0x02 = ADC link check
-failed), `g_cfg` (raw CONFIG readback, expect `0x1041`), `g_sample_a`,
-`g_sample_b`, `g_tick`, `g_err_frame`, `g_err_busy`.
+failed), `g_phase` (0 = idle, 1 = streaming), `g_cfg` (raw CONFIG readback,
+expect `0x1041`), `g_cfg_cycles` / `g_err_cfg` (idle probes done / failed),
+`g_sample_a`, `g_sample_b`, `g_tick`, `g_err_frame`, `g_err_busy`.
 
 ## Bring-up ladder (matches docs/PLAN.md phases)
 
-1. `make flash` a clean build → heartbeat LED (P1.0) blinks 1 Hz.
-2. Scope on P2.2 (CLOCK) → a ~20 µs burst every 10 ms; `g_status` reads 0x0000
-   with the 32 kHz source attached.
-3. Wire the ADC per the table, power the EVM, reflash the normal build →
-   error LED stays off, `g_cfg` reads `0x1041` (link check pass), and ~2.5 V
-   appears on the EVM REFIO test points.
-4. Feed known DC levels (0 / 2.5 / 5 V → ≈ −32768 / 0 / +32767) into J2.5
-   (CHA1) and J1.5 (CHB1); *different* levels on the two confirm that frame A
-   and frame B are not swapped and that the mux is on pair 1 — grounding J2.3
-   (CHA2) should change nothing.
-5. Soak: error LED stays off for minutes (`g_err_frame`/`g_err_busy` stay 0).
+1. `make flash` a clean build → heartbeat LED (P1.0) blinks 0.5 Hz (idle);
+   press S1 or S2 → the blink doubles to 1 Hz (streaming).
+2. Scope on P2.2 (CLOCK) → idle shows two 24-clock probe bursts once a second;
+   after the button press, a ~20 µs acquisition burst every 10 ms. `g_status`
+   reads 0x0000 with the 32 kHz source attached.
+3. Wire the ADC per the table, power the EVM, reflash the normal build → in
+   the idle phase the error LED stays off, `g_cfg` reads `0x1041` and
+   `g_cfg_cycles` climbs about once a second (the link probe passing over and
+   over), and ~2.5 V appears on the EVM REFIO test points. Pull a J5 wire and
+   the error LED lights within a second — `g_err_cfg` starts counting.
+4. Press S1 or S2 to start streaming, then feed known DC levels
+   (0 / 2.5 / 5 V → ≈ −32768 / 0 / +32767) into J2.5 (CHA1) and J1.5 (CHB1);
+   *different* levels on the two confirm that frame A and frame B are not
+   swapped and that the mux is on pair 1 — grounding J2.3 (CHA2) should change
+   nothing.
+5. Soak: error LED stays off for minutes (`g_err_frame`/`g_err_busy`/`g_err_cfg`
+   stay 0).
 
 If frames come back shifted/corrupt at 8 MHz (see risk A in the plan), lower
 `ADC_SCLK_DIV` in [src/board.h](src/board.h) to 2 (4 MHz) or 4 (2 MHz).

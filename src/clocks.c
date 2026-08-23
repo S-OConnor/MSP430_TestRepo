@@ -62,6 +62,23 @@ static void gpio_init(void)
     P1REN |= BIT5;
     P1OUT &= (uint8_t)~BIT5;
 
+    /* Push buttons S1 (P4.5) and S2 (P1.1): inputs with the internal PULL-UP
+     * enabled. The LaunchPad wires each switch straight to GND with no
+     * external pull-up, so without this the pins would float and read
+     * randomly. With PxREN set, PxOUT chooses the resistor direction - 1 is
+     * up - so the pin idles HIGH and a press pulls it LOW.
+     *   PxDIR.n = 0 -> input
+     *   PxREN.n = 1 -> internal resistor enabled
+     *   PxOUT.n = 1 -> resistor pulls UP
+     * Polled every tick in main(); no port interrupt is needed because the
+     * firmware is already awake at 100 Hz. */
+    P4DIR &= (uint8_t)~BIT5;
+    P4REN |= BIT5;
+    P4OUT |= BIT5;
+    P1DIR &= (uint8_t)~BIT1;
+    P1REN |= BIT1;
+    P1OUT |= BIT1;
+
     /* LFXIN (PJ.4): select the crystal-oscillator function so the external
      * 32.768 kHz square wave reaches the clock system. Function select for
      * the LFX pins is PJSEL1=0, PJSEL0=1 (bypass vs crystal mode is chosen

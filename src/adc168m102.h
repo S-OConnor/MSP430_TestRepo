@@ -2,6 +2,7 @@
 #define ADC168M102_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /*
  * ADC168M102R-SEP driver — Mode II (M0=0 strap, M1=1) + special read (SR=1),
@@ -106,6 +107,25 @@ typedef enum {
  * The raw CONFIG readback is kept for the caller to publish (g_cfg). */
 uint8_t adc168_init(void);
 uint16_t adc168_link_readback(void);
+
+/* Write CONFIG with the "read CONFIG back" action and fetch the reply, i.e.
+ * one write+read exchange with the register. This is what main() repeats once
+ * a second in the idle phase while it waits for a LaunchPad button; the
+ * returned word is the raw readback (publish it, or hand it to
+ * adc168_config_ok()). It writes SR=0, so acquisition is NOT armed afterwards
+ * — adc168_start_stream() must run before the first sample. */
+uint16_t adc168_config_cycle(void);
+
+/* True if a CONFIG readback matches what was written (mode bits 11:4 = 0x04).
+ * Same test adc168_init() uses to decide ST_ADC_NOLINK. */
+bool adc168_config_ok(uint16_t raw);
+
+/* Arm continuous acquisition: write the operating CONFIG (SR=1, PDE=1,
+ * C=ADC_PAIR) and burn two conversions to flush the mode-change pipeline.
+ * Called by adc168_init(), and again by main() when a button ends the idle
+ * phase — the idle probe leaves SR=0 behind, so this is mandatory before
+ * adc168_read() results can be trusted. */
+void adc168_start_stream(void);
 
 /* Convert pair ADC_PAIR and read both results: *a = CHA<ADC_PAIR>,
  * *b = CHB<ADC_PAIR>, sampled at the same instant. The channel-select command
