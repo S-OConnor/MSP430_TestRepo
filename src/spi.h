@@ -12,7 +12,25 @@
  * (SBASAW9 §6.3.1.4), at the bottom of its half-clock range. */
 void spi_init(void);
 
-/* Blocking full-duplex byte exchange (~16 us @ 0.5 MHz). */
-uint8_t spi_xfer(uint8_t tx);
+/* Block until the SPI is fully idle (shift register drained, SCLK parked at
+ * idle low) AND the transmit buffer will accept a byte without blocking.
+ *
+ * Call this immediately BEFORE a strobe that has to sit right in front of a
+ * burst — RD opening a read access, CONVST arming a conversion. It moves the
+ * waiting to before the strobe, so what remains between the strobe and the
+ * first SCLK edge is a fixed handful of instructions instead of an
+ * open-ended poll. Without it the strobe can precede the clock by a long and
+ * variable gap, or even land mid-burst. */
+void spi_wait_ready(void);
+
+/* Exchange n bytes as ONE contiguous train of clocks — no stall at the byte
+ * boundaries, which a byte-at-a-time loop cannot avoid (see spi.c for why).
+ * Full duplex: tx[i] goes out while rx[i] comes in. Pass rx = NULL to
+ * discard the received bytes. On return the shift register is empty and SCLK
+ * is back at idle low, so a following strobe is safe.
+ *
+ * Blocking: n * 16 us at the 0.5 MHz bit clock. A 3-byte access is ~48 us,
+ * and a streaming tick spends three of them — ~150 us out of 10 ms. */
+void spi_burst(const uint8_t *tx, uint8_t *rx, uint8_t n);
 
 #endif /* SPI_H */

@@ -47,26 +47,31 @@ boundaries. The nine columns are, in order, exactly the calls the firmware
 makes:
 
 ```c
-ADC_CS_LOW();                             /* ~CS low, and it stays low       */
-write_word(0x1041)  ->  ADC_RD_PULSE();   /* falling edge opens the access   */
-                        spi_xfer(0x10);   /* 8 gated SCLKs, command MSB      */
-                        spi_xfer(0x41);   /* 8 gated SCLKs, command LSB      */
-                        spi_xfer(0x00);   /* 8 gated SCLKs, activation edges */
-read_word()         ->  ADC_RD_PULSE();
-                        spi_xfer(0x00);   /* -> 0x04 */
-                        spi_xfer(0x00);   /* -> 0x10 */
-                        spi_xfer(0x00);   /* -> 0x40 */
+ADC_CS_LOW();                                /* ~CS low, and it stays low    */
+write_word(0x1041)  ->  spi_wait_ready();    /* SPI idle + TXBUF free        */
+                        ADC_RD_PULSE();      /* falling edge opens the access*/
+                        spi_burst({0x10,     /* 24 contiguous SCLKs:         */
+                                   0x41,     /*   command MSB, command LSB,  */
+                                   0x00})    /*   activation edges           */
+read_word()         ->  spi_wait_ready();
+                        ADC_RD_PULSE();
+                        spi_burst({0,0,0})   /* -> 0x04 0x10 0x40            */
 ```
 
-Inside each `spi_xfer()` the CLOCK lane shows its 8 real cycles, and MOSI/MISO
-show the actual bit levels for the byte named above them (MSB first). Between
-bursts the clock is parked low — that gap is where the strobes move. At
-`ADC_SCLK_DIV = 16` a cycle is 2 µs (0.5 MHz), so the 48 clocks are ~96 µs of
-bus time; the gaps are CPU overhead, not specified delays.
+Each `spi_burst()` is **one unbroken run of 24 clocks** — the byte boundaries
+inside it are invisible on the CLOCK lane, because the eUSCI's transmit buffer
+is reloaded while the previous byte is still shifting. MOSI/MISO show the
+actual bit levels, MSB first. The clock is parked low only *between* accesses,
+and that is where the strobes move. At `ADC_SCLK_DIV = 16` a cycle is 2 µs
+(0.5 MHz), so each access is 48 µs and the pair is ~96 µs of bus time.
+
+If you see the clock stall for roughly a bit time at each byte boundary, or a
+long lag between the RD edge and the first clock, the firmware is not using
+`spi_burst()`/`spi_wait_ready()` — that is exactly what they exist to prevent.
 
 | Signal | Pin | Behaviour during a register access |
 |---|---|---|
-| **CLOCK** | P2.2 / UCB0CLK | Gated: 8 cycles per `spi_xfer()`, 24 per access, idle low in between. |
+| **CLOCK** | P2.2 / UCB0CLK | Gated: 24 contiguous cycles per access, idle low in between — no stall at the byte boundaries. |
 | **~CS** | P1.4 | Driven low once in `adc168_init()` and held low for the whole session. |
 | **CONVST** | P2.6 | Flat low. `ADC_CONVST_PULSE()` is never called on this path — it appears only in `adc168_read()`. |
 | **RD** | P4.2 | Idles low. `ADC_RD_PULSE()` drives it high then low; the **falling** edge — the last thing before the first clock burst — opens the access. |
@@ -125,8 +130,11 @@ only visible difference from the special-read arrangement.
 | **SDI** | P1.6 → J5.15 | `0x40 0x00` — the constant channel command (`C = 01`, `R = 00` "update C only"). Latched during the first 16 clocks of *each* read access; re-asserting the same pair twice is harmless. |
 
 At `ADC_SCLK_DIV = 16` a clock cycle is 2 µs (0.5 MHz), so each of the three
-bursts is 48 µs; the gaps between them are CPU overhead, not specified delays.
-The whole acquisition is ~150 µs out of a 10.00 ms tick.
+bursts is 48 µs of unbroken clocking. The gaps *between* bursts are CPU
+overhead, not specified delays — but each strobe sits tight against the burst
+it opens (a few hundred ns, fixed), because `spi_wait_ready()` does the
+waiting before the strobe rather than after it. The whole acquisition is
+~150 µs out of a 10.00 ms tick.
 
 ### Turning the readout into numbers
 

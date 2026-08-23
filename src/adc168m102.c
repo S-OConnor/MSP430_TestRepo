@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stddef.h>
 #include "board.h"
 #include "spi.h"
 #include "adc168m102.h"
@@ -140,19 +141,28 @@ static uint16_t s_link_readback;    /* raw CONFIG readback, published as g_cfg *
  * becomes ACTIVE "with the CLOCK rising edge after completing the 16-clock
  * write access" (§7). With a free-running clock that edge arrives naturally;
  * with our gated clock it would never come until the next access — so we
- * append 8 extra clocks to deliver it immediately.
+ * append 8 extra clocks to deliver it immediately. All three bytes go out in
+ * one spi_burst() so those 24 clocks are contiguous — the activation edge
+ * has to be part of the same access, not a separate burst after a gap.
+ *
+ * spi_wait_ready() before the strobe is what keeps RD tight against the
+ * first clock edge; see the note in read_access().
  */
 static void write_word(uint16_t w)
 {
+    const uint8_t tx[3] = { (uint8_t)(w >> 8),      /* bits 15..8 */
+                            (uint8_t)w,             /* bits  7..0 */
+                            0x00u };                /* activation clocks */
+
+    spi_wait_ready();
     ADC_RD_PULSE();
-    (void)spi_xfer((uint8_t)(w >> 8));      /* bits 15..8 */
-    (void)spi_xfer((uint8_t)w);             /* bits  7..0 */
-    (void)spi_xfer(0x00);                   /* activation clock edges */
+    spi_burst(tx, NULL, sizeof tx);
 }
 
 /*
  * One READ ACCESS — the single shape every reply from this part arrives in,
- * now that SR is 0 (§6.5.2.2): an RD pulse, then 3 bytes = 24 gated CLOCKs.
+ * now that SR is 0 (§6.5.2.2): an RD pulse, then 3 bytes = 24 gated CLOCKs
+ * in one contiguous burst.
  *
  * The RD falling edge makes the ADC start driving SDOA; the frame that comes
  * back is 20 bits and the last 4 clocks are padding the part ignores:
@@ -169,10 +179,22 @@ static void write_word(uint16_t w)
  */
 static void read_access(uint8_t cmd, uint8_t *b)
 {
+    const uint8_t tx[3] = { cmd, 0x00u, 0x00u };
+
+    /* Order matters here. The ADC captures RD on a CLOCK falling edge, so
+     * the strobe wants to sit immediately in front of the burst it opens —
+     * and the burst has to be one unbroken run of 24 clocks, because the
+     * part counts edges within an access.
+     *
+     * spi_wait_ready() does the waiting BEFORE the strobe, so all that is
+     * left between the RD falling edge and the first SCLK edge is the write
+     * to the transmit buffer: a fixed handful of cycles, the same on every
+     * access. Doing it the other way round — strobe, then wait for the SPI —
+     * puts an open-ended poll in exactly the place the ADC is least able to
+     * tolerate one. */
+    spi_wait_ready();
     ADC_RD_PULSE();
-    b[0] = spi_xfer(cmd);
-    b[1] = spi_xfer(0x00);
-    b[2] = spi_xfer(0x00);
+    spi_burst(tx, b, sizeof tx);
 }
 
 /* The 16 payload bits of a read access, with the leading zero, the A/B
@@ -351,6 +373,7 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
      * touch nothing else" — so a corrupted transfer can at worst convert the
      * wrong pair once, and the next access puts it straight back. */
     const uint8_t cword = ADC168_CWORD_BYTE;
+    const uint8_t conv_tx[3] = { ADC168_CWORD_BYTE, 0x00u, 0x00u };
     uint8_t fa[3], fb[3];
     uint16_t tries = ADC_BUSY_TIMEOUT;
 
@@ -362,17 +385,21 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
         return ADC168_ERR_BUSY_TIMEOUT;
     }
 
-    /* Freeze the sample-and-holds; conversion arms for the next CLOCK edge. */
+    /* Freeze the sample-and-holds; conversion arms for the next CLOCK edge.
+     * Primed first, for the same reason as the RD strobe: the conversion
+     * starts on the first CLOCK rising edge after CONVST, so every cycle
+     * between the two is time the sample sits in hold, drooping, before the
+     * SAR gets to it. */
+    spi_wait_ready();
     ADC_CONVST_PULSE();
 
-    /* Feed the conversion: 3 bytes = 24 gated CLOCKs, comfortably above the
-     * required ~17.5 conversion + 2 acquisition clocks. No RD pulse was
-     * issued, so the ADC is not driving SDOA and ignores SDI — but we put
-     * the command byte in the first slot anyway: if the part latched it
-     * unexpectedly it would command the SAME pair (harmless). */
-    (void)spi_xfer(cword);
-    (void)spi_xfer(0x00);
-    (void)spi_xfer(0x00);
+    /* Feed the conversion: 3 bytes = 24 gated CLOCKs in one contiguous
+     * burst, comfortably above the required ~17.5 conversion + 2 acquisition
+     * clocks. No RD pulse was issued, so the ADC is not driving SDOA and
+     * ignores SDI — but we put the command byte in the first slot anyway: if
+     * the part latched it unexpectedly it would command the SAME pair
+     * (harmless). */
+    spi_burst(conv_tx, NULL, sizeof conv_tx);
 
     /* BUSY should already have fallen during the burst: the conversion ends
      * after the ~18th clock (36 us at 0.5 MHz) and the burst runs 24 clocks

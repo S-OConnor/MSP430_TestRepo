@@ -96,8 +96,8 @@ Each phase is independently flashable and verified before the next begins; ADC h
 
 ## Phase 3 — SPI transport (`spi.c`)
 
-**Work**: eUSCI_B0 master: `UCSWRST` → `UCMST|UCSYNC|UCMSB|UCSSEL__SMCLK` (UCCKPH=0/UCCKPL=0), `UCB0BRW=ADC_SCLK_DIV` (16 → 0.5 MHz) → release. Blocking `spi_xfer()` (TXIFG→TXBUF→RXIFG→RXBUF); eUSCI idles SCLK low between transfers = the ADC's permitted static-low burst clock.
-**Exit criteria**: a scope on P2.2 (CLOCK) and P1.6 (SIMO) shows the expected byte on the wire at the configured `ADC_SCLK_DIV` rate.
+**Work**: eUSCI_B0 master: `UCSWRST` → `UCMST|UCSYNC|UCMSB|UCSSEL__SMCLK` (UCCKPH=0/UCCKPL=0), `UCB0BRW=ADC_SCLK_DIV` (16 → 0.5 MHz) → release. `spi_burst(tx, rx, n)` reloads `UCB0TXBUF` on **TXIFG** — while the previous byte is still shifting — so an access is one contiguous train of clocks; `spi_wait_ready()` (UCBUSY clear + TXIFG set) is called *before* RD/CONVST so the strobe→first-edge gap is a fixed handful of cycles. eUSCI idles SCLK low between accesses = the ADC's permitted static-low burst clock. *(Amended: the original byte-at-a-time `spi_xfer()` waited on RXIFG per byte, which stalled the clock at every byte boundary and put an open-ended poll between the strobe and the burst.)*
+**Exit criteria**: a scope on P2.2 (CLOCK) and P1.6 (SIMO) shows the expected bytes on the wire at the configured `ADC_SCLK_DIV` rate, as an unbroken 24-clock run per access with no stall at the byte boundaries, and with the RD edge tight against the first clock.
 
 ## Phase 4 — ADC link + configuration (`adc168m102.c` part 1)
 

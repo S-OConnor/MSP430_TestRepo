@@ -145,6 +145,7 @@ flowchart LR
 |---|---|---|
 | ADC interface | eUSCI_B0 SPI at **0.5 MHz** for CLOCK/SDI/SDOA + three GPIO strobes | The ADC's clock doubles as its conversion clock and the datasheet permits a gated ("burst") clock — which is exactly what an SPI master produces ([§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)). Half-clock mode accepts 0.5–20 MHz *(ADC §6.3.1.4, p. 19)*, and this build sits at the bottom of that range: SMCLK 8 MHz ÷ `ADC_SCLK_DIV` 16. The slow clock is deliberate — 2 µs per bit is enormous setup/hold margin for jumper-wired signals, and it makes the ~190 ns CONVST/RD strobes shorter than one CLOCK period outright, satisfying the datasheet's pulse-width rule literally rather than only via the gated-clock argument (risk A in PLAN.md). One conversion still costs only ~135 µs out of a 10 ms tick, so nothing is given up. |
 | ADC operating mode | **Plain Mode II** (M0 strapped low), special read **off** (SR=0), pseudo-differential (PDE=1) | Mode II = M0 0, M1 1: manual channel select, SDOA only *(ADC Table 6-5, p. 21)* — M1 high is also what deactivates SDOB, so SDOA is the one serial output. With SR=0 a read access returns one 20-bit frame *(ADC §6.5.2.2, p. 26)*, so the pair's two results take two read accesses (RD + 24 clocks each) instead of one 40-clock burst. It costs one extra strobe and 8 clocks a tick; in exchange every access on the bus has the same shape — RD plus three bytes — whether it carries a register value or half a conversion, and the frame decoder is one routine rather than two. The internal 2.5 V reference is routed as common mode by software, so the EVM needs no jumper changes. |
+| Strobe/clock alignment | Every access is one `spi_burst()` — a contiguous train of clocks, with `spi_wait_ready()` called *before* the strobe that opens it | The ADC captures RD on a CLOCK falling edge and starts a conversion on the first rising edge after CONVST, so it cares where the strobes sit relative to the clock. A byte-at-a-time routine that waits for `UCRXIFG` before returning empties the shift register at every byte boundary and puts an open-ended poll between the strobe and the first edge. Reloading `UCB0TXBUF` on `UCTXIFG` instead — while the previous byte is still shifting — keeps the clock unbroken, and moving the wait ahead of the strobe makes the strobe→clock gap a fixed handful of cycles ([§6](#6-what-spi-is)). |
 | Input mux | Pseudo-differential **4:1** configuration (`PDE=1`, ADC Table 6-2, p. 17), channel picked by CONFIG `C[1:0]` | Gives four single-ended inputs per converter measured against a common mode, which is what this application wants. `M0 = 0` keeps selection *manual* through `C[1:0]`; the SEQFIFO sequencer applies only to automatic mode (`M0 = 1`) *(ADC §6.3.2.1, p. 21)* and is left at its reset default. |
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
 | Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
@@ -384,6 +385,18 @@ Motorola convention — a classic trap, called out in `spi.c`).
           ^      ^                     ADC drives MISO on rising edges
  MISO  ---< b7 >< b6 >< b5 >< b4 > ...   (MSB first)
 ```
+
+**Bursts, not bytes.** The eUSCI is double buffered: `UCTXIFG` sets as soon as
+a queued byte moves from `UCB0TXBUF` into the shift register — while that byte
+is still going out. Reloading the buffer at that moment means the next byte is
+already waiting when the current one ends, so the clock runs straight through
+the byte boundary. Reloading only after `UCRXIFG` ("the byte has finished")
+instead leaves the shift register empty for the length of a CPU round trip,
+which shows up on a scope as a stall of roughly a bit time at every byte
+boundary. `spi_burst()` does the former. The same round trip, sitting between
+a strobe and the first clock edge, is why `spi_wait_ready()` is called
+*before* RD and CONVST rather than letting the burst do the waiting after
+them — see [§10.3](#103-one-conversion--readout-adc168_read).
 
 A 0.5 MHz clock means each bit takes 2 µs, a byte 16 µs. That is the slowest
 the ADC allows — it accepts 0.5–20 MHz in half-clock mode *(ADC §6.3.1.4,
@@ -887,6 +900,9 @@ JP1/JP2 jumpers can stay in their default `CMx_EXT` position *(EVM §2.2, p. 5)*
 
 1. **Check BUSY is low.** "Do not issue a rising CONVST edge during a
    conversion (that is, when BUSY is high)" *(ADC §6.3.1.1, p. 18)*.
+   Then `spi_wait_ready()`: the SPI must be idle *and* primed before the
+   strobe, so that what follows the strobe is a clock edge rather than a
+   poll.
 2. **Pulse CONVST** (two GPIO writes, ~190 ns, clock is idle).
    Sample-and-holds freeze; the conversion starts on the next CLOCK rising
    edge, for which CONVST needs 12 ns of setup *(ADC §6.3.1.1, p. 18)*.
