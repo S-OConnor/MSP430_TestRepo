@@ -33,10 +33,13 @@
  *
  *  MCU clock tree (set up in clocks.c):
  *    MCLK  = 16 MHz  (DCO)         - CPU clock
- *    SMCLK =  8 MHz  (DCO / 2)     - feeds the eUSCI SPI bit clock
- *    ACLK  = 32.768 kHz            - LaunchPad crystal Y4 on PJ.4/PJ.5
- *                                    (LFXT crystal mode), feeds the 100 Hz
- *                                    sample-tick timer
+ *    SMCLK =  8 MHz  (DCO / 2)     - feeds the eUSCI SPI bit clock AND the
+ *                                    100 Hz sample-tick timer (via /8 = 1 MHz)
+ *    ACLK  = ~9.4 kHz (VLO)        - parked on the internal low-power
+ *                                    oscillator; nothing is timed from it.
+ *                                    No crystal is used: LFXT and HFXT are
+ *                                    both held off, so PJ.4/PJ.5 stay plain
+ *                                    GPIO and the LaunchPad's Y4 is idle.
  *
  *  Analog inputs (EVM headers, odd pins signal / even pins GND):
  *
@@ -52,11 +55,13 @@
 /* ---- tunables ---------------------------------------------------------- */
 
 /* eUSCI_B0 bit-clock divider: SPI SCLK = SMCLK / ADC_SCLK_DIV.
- * 1 -> 8 MHz (default). The ADC accepts 0.5..20 MHz in half-clock mode.
- * If bring-up shows corrupted frames (risk A in docs/PLAN.md: the CONVST/RD
- * strobe-width spec is written against a free-running clock), slow down here:
- * 2 -> 4 MHz, 4 -> 2 MHz. Nothing else needs to change. */
-#define ADC_SCLK_DIV        1u
+ * 16 -> 8 MHz / 16 = 0.5 MHz, the bottom of the ADC's 0.5..20 MHz half-clock
+ * window and the rate this build runs at. The slow clock buys margin against
+ * risk A in docs/PLAN.md (the CONVST/RD strobe-width spec is written against
+ * a free-running clock) and against long jumper wires, at the cost of a
+ * longer bus burst per tick (~135 us, still ~1.4 % of the 10 ms tick).
+ * Faster is a one-line change: 8 -> 1 MHz, 4 -> 2 MHz, 1 -> 8 MHz. */
+#define ADC_SCLK_DIV        16u
 
 /* Which channel pair the ADC converts, 0..3.
  *
@@ -74,24 +79,11 @@
 #error "ADC_PAIR must be 0..3 (pair k = CHAk + CHBk)"
 #endif
 
-/* Sample-tick period in ACLK cycles. 32768 Hz / 328 = 99.902 Hz, the closest
- * exact fit to 100 Hz (32768 = 2^15, so no integer divider hits 100.000 Hz).
- * Using 320 instead would give a "round" 102.4 Hz. */
-#define TICK_PERIOD_ACLK    328u
-
-/* Fallback tick period used when the LFXT crystal never starts: the timer
- * then runs from SMCLK/8 = 1 MHz, and 1 MHz / 10000 = exactly 100 Hz (but
- * only as accurate as the internal DCO, roughly +-2 %). */
+/* Sample-tick period in timer clocks. Timer_A0 runs from SMCLK/8 = 1 MHz, and
+ * 1 MHz / 10000 = exactly 100.000 Hz - as accurate as the internal DCO, which
+ * is roughly +-2 %. The tick only has to be regular enough to space the ADC
+ * bursts evenly; nothing downstream measures absolute time from it. */
 #define TICK_PERIOD_SMCLK   10000u
-
-/* How long clock_init() waits for the 32.768 kHz crystal to start, in 10 ms
- * passes of the oscillator-fault clear/re-test loop: 100 x 10 ms = 1 s.
- *
- * A watch crystal takes hundreds of milliseconds to reach amplitude, and the
- * fault flag keeps re-latching until it does - so this window has to be far
- * longer than the microseconds a logic-level clock input would have needed,
- * or every cold boot would falsely report ST_NO_LFXT. */
-#define LFXT_SETTLE_TRIES   100u
 
 /* Idle-phase period, in sample ticks: how often the firmware rewrites and
  * reads back the ADC CONFIG register while it waits for a button press.
@@ -109,8 +101,10 @@
 
 /* How many polling-loop iterations to wait for BUSY to drop after a
  * conversion. The conversion itself needs ~18 of our 24 burst clocks
- * (3 us @ 8 MHz); each loop iteration is a few CPU cycles at 16 MHz, so 400
- * iterations is a generous ~50 us upper bound before declaring a timeout. */
+ * (36 us @ 0.5 MHz SCLK), so it is already over by the time the 24-clock
+ * burst (48 us) ends and this loop starts - the loop only exists so a dead
+ * ADC cannot hang the tick. Each iteration is a few CPU cycles at 16 MHz, so
+ * 400 iterations is a ~50 us upper bound before declaring a timeout. */
 #define ADC_BUSY_TIMEOUT    400u
 
 /* CPU frequency, used by __delay_cycles() busy-waits (compile-time constant). */
@@ -118,8 +112,9 @@
 
 /* ---- status flags (latched into g_status; any nonzero -> error LED) ---- */
 
-#define ST_NO_LFXT          0x01u   /* crystal Y4 never started; ACLK is on
-                                     * VLO and the tick runs from SMCLK      */
+/* 0x01 is retired: it was ST_NO_LFXT, raised when the 32.768 kHz crystal
+ * failed to start. No crystal is used any more, so the condition - and the
+ * ~1 s boot delay spent waiting for it - no longer exists. */
 #define ST_ADC_NOLINK       0x02u   /* CONFIG readback mismatch during init:
                                      * wiring / M0 strap / EVM power suspect */
 
@@ -139,7 +134,9 @@
  * Both strobes are two back-to-back port writes: BIS.B then BIC.B, roughly
  * 190 ns at 16 MHz MCLK. The datasheet's "max one CLOCK period" pulse-width
  * rule assumes a free-running CLOCK; we only strobe while our gated SCLK is
- * sitting idle low, so no clock edge can ever land inside the pulse. */
+ * sitting idle low, so no clock edge can ever land inside the pulse. At the
+ * 0.5 MHz SCLK one clock period is 2 us, so the 190 ns pulse also satisfies
+ * that rule literally - it would even on a free-running clock. */
 #define ADC_CONVST_PULSE()  do { P2OUT |= BIT6; P2OUT &= (uint8_t)~BIT6; } while (0)
 #define ADC_RD_PULSE()      do { P4OUT |= BIT2; P4OUT &= (uint8_t)~BIT2; } while (0)
 

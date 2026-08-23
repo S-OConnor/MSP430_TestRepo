@@ -273,7 +273,7 @@ uint16_t adc168_link_readback(void)
 /*
  * One complete conversion + readout cycle — the entire per-tick ADC workload.
  *
- *  Timeline (8 MHz SCLK; total ~10 us of bus time):
+ *  Timeline (0.5 MHz SCLK — 2 us per clock; total ~135 us of bus time):
  *
  *    CONVST _|‾|__________________________________________________
  *    CLOCK  ____xxxxxxxxxxxxxxxxxxxxxxxx____xxxx...xxxx___________
@@ -318,8 +318,10 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
     (void)spi_xfer(0x00);
     (void)spi_xfer(0x00);
 
-    /* BUSY should already have fallen during the burst (after the ~18th
-     * clock). Poll with a bounded loop so a dead ADC cannot hang the tick. */
+    /* BUSY should already have fallen during the burst: the conversion ends
+     * after the ~18th clock (36 us at 0.5 MHz) and the burst runs 24 clocks
+     * (48 us). Poll with a bounded loop anyway so a dead ADC cannot hang the
+     * tick. */
     while (ADC_BUSY() && --tries) {
     }
     if (tries == 0u) {

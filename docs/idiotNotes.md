@@ -24,20 +24,24 @@ being used. By default (after power-up), the ADC operates in half-clock mode tha
 0.5MHz to 20MHz. 
 
 "External" here means external *to the ADC chip* - the part has no oscillator of its own. It does NOT mean a 
-bench source: the MSP430's eUSCI_B0 SPI is what drives the CLOCK pin, at 8MHz, in gated bursts (24 clocks for 
+bench source: the MSP430's eUSCI_B0 SPI is what drives the CLOCK pin, at 0.5MHz, in gated bursts (24 clocks for 
 a register access, 40 for a readout, idle low in between - allowed by datasheet 6.3.1.4). Nothing on either 
-board is clocked from outside.
+board is clocked from outside. 0.5MHz is the slowest the ADC accepts in half-clock mode, picked for wiring 
+margin - one bit is 2us, and a whole tick's traffic is still only ~135us.
 
 Do not confuse this with the MSP430's own timebase. Two different clocks:
 
 | Clock | What it is | Where it comes from |
 | --- | --- | --- |
-| ADC CLOCK (8MHz) | conversion + serial clock for the ADC | MSP430 SPI, P2.2 -> EVM J5 pin 7 |
-| ACLK (32.768kHz) | source of the 100Hz sample tick | LaunchPad's onboard crystal Y4, on PJ.4/PJ.5 (LFXT crystal mode) |
+| ADC CLOCK (0.5MHz) | conversion + serial clock for the ADC | MSP430 SPI, SMCLK 8MHz / 16, P2.2 -> EVM J5 pin 7 |
+| tick timer (100Hz) | when a conversion happens | Timer_A0 on SMCLK/8 = 1MHz, period 10000 |
 
-Y4 is already fitted on the LaunchPad and neither of its pins reaches a header, so the timebase needs no wiring 
-at all. A watch crystal is slow to start (hundreds of ms), which is why clock_init() gives it a ~1s window before 
-giving up and falling back to a DCO tick with the ST_NO_LFXT flag set.
+Both come from the MSP430's internal DCO. **No crystal is used at all**: LFXT and HFXT are held off, PJ.4/PJ.5 
+stay plain GPIO, and the LaunchPad's onboard 32.768kHz crystal Y4 just sits there unused. That costs ~2% of 
+timebase accuracy, which nothing here needs - the tick only has to space the ADC bursts evenly, and the scope 
+supplies the timebase for the measurement itself. In exchange there is no crystal start-up window at boot (a 
+watch crystal takes hundreds of ms to start, so clock_init() used to spend up to ~1s waiting for it) and no 
+crystal-failure mode to handle.
 
 ## Conversion:
 

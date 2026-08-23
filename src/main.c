@@ -55,9 +55,10 @@
  *  keeps one timebase for everything: the sample rate, the 1 s idle period
  *  (IDLE_CONFIG_TICKS), and the button poll/debounce interval.
  *
- *  Timing budget per 10 ms tick: ~20 us of ADC bus traffic while streaming
- *  (~6 us once a second while idle), a few us of bookkeeping. The CPU is
- *  awake well under 1 % of the time in either phase.
+ *  Timing budget per 10 ms tick: ~135 us of ADC bus traffic while streaming
+ *  at the 0.5 MHz SCLK (~100 us once a second while idle), a few us of
+ *  bookkeeping. The CPU is awake under 2 % of the time while streaming and
+ *  essentially never while idle.
  * =============================================================================
  */
 
@@ -116,29 +117,23 @@ static bool button_pressed(void)
 
 /* ---- sample tick timer -------------------------------------------------- */
 
-static void timer_init(uint8_t status)
+static void timer_init(void)
 {
     /* Timer_A0 in "up mode": the 16-bit counter climbs from 0 to TA0CCR0,
      * fires the CCR0 interrupt, resets to 0, and repeats. So the period is
-     * (CCR0 + 1) timer clocks — hence the "- 1" on the constants. */
-    if (status & ST_NO_LFXT) {
-        /* Fallback (the 32.768 kHz crystal never started): clock the timer
-         * from SMCLK.
-         *   TASSEL__SMCLK  source = SMCLK (8 MHz)
-         *   ID__8          input divider /8 -> 1 MHz timer clock
-         *   MC__UP         up mode
-         *   TACLR          clear the counter/divider state on start
-         * 1 MHz / 10000 = exactly 100 Hz (to DCO accuracy, ~+-2 %). */
-        TA0CCR0 = TICK_PERIOD_SMCLK - 1u;
-        TA0CCTL0 = CCIE;            /* enable the CCR0 compare interrupt */
-        TA0CTL = TASSEL__SMCLK | ID__8 | MC__UP | TACLR;
-    } else {
-        /* Normal: clock the timer straight from ACLK = the LaunchPad's
-         * 32.768 kHz crystal. 32768 / 328 = 99.902 Hz. */
-        TA0CCR0 = TICK_PERIOD_ACLK - 1u;
-        TA0CCTL0 = CCIE;
-        TA0CTL = TASSEL__ACLK | MC__UP | TACLR;
-    }
+     * (CCR0 + 1) timer clocks — hence the "- 1" on the constant.
+     *
+     * With no crystal on the board the timebase is SMCLK, i.e. the DCO:
+     *   TASSEL__SMCLK  source = SMCLK (8 MHz)
+     *   ID__8          input divider /8 -> 1 MHz timer clock
+     *   MC__UP         up mode
+     *   TACLR          clear the counter/divider state on start
+     * 1 MHz / 10000 = exactly 100.000 Hz, to DCO accuracy (~+-2 %). The tick
+     * only has to space the ADC bursts evenly — nothing measures absolute
+     * time from it — so DCO accuracy is ample. */
+    TA0CCR0 = TICK_PERIOD_SMCLK - 1u;
+    TA0CCTL0 = CCIE;                /* enable the CCR0 compare interrupt */
+    TA0CTL = TASSEL__SMCLK | ID__8 | MC__UP | TACLR;
 }
 
 /* Timer_A0 CCR0 interrupt: fires once per sample period. It does the
@@ -170,8 +165,9 @@ int main(void)
      * is the "stop counting" bit. */
     WDTCTL = WDTPW | WDTHOLD;
 
-    g_status = clock_init();        /* GPIO map, LPM5 unlock, 16/8 MHz, LFXT */
-    spi_init();                     /* 8 MHz CPOL0/CPHA1 master              */
+    clock_init();                   /* GPIO map, LPM5 unlock, DCO 16/8 MHz   */
+    g_status = 0u;                  /* no crystal to fail -> nothing to flag */
+    spi_init();                     /* 0.5 MHz CPOL0/CPHA1 master            */
     __enable_interrupt();           /* set GIE                               */
 
     /* Reset + configure the ADC; also runs the link check. The raw CONFIG
@@ -193,7 +189,7 @@ int main(void)
      * or left unpowered while the digital link is verified once a second. */
     g_phase = PHASE_IDLE;
 
-    timer_init(g_status);           /* start the ~100 Hz tick */
+    timer_init();                   /* start the 100 Hz tick */
 
     for (;;) {
         /* Sleep until the tick ISR sets the flag. The disable/test/sleep
@@ -203,8 +199,8 @@ int main(void)
          * AND enters low-power mode 0 in one instruction.
          *
          * LPM0 rather than the deeper LPM3 because LPM3 stops SMCLK — which
-         * is exactly what clocks the tick timer in the no-LFXT fallback, so
-         * LPM3 would leave that build asleep forever. */
+         * is exactly what clocks the tick timer, so LPM3 would leave the
+         * firmware asleep forever. */
         __disable_interrupt();
         while (!g_tick_pending) {
             __bis_SR_register(LPM0_bits | GIE);
@@ -233,7 +229,7 @@ int main(void)
             }
             idle_ticks = 0;
 
-            /* One write + one read of the CONFIG register (~6 us of bus
+            /* One write + one read of the CONFIG register (~100 us of bus
              * traffic). On a scope: two RD pulses, 24 clocks each, once a
              * second - and a stuck or mis-wired SDOA shows up immediately as
              * a bad readback rather than as bad samples later. */
@@ -253,7 +249,7 @@ int main(void)
         }
 
         /* ---- streaming phase --------------------------------------------
-         * One conversion + readout covers both channels (~20 us). The mux
+         * One conversion + readout covers both channels (~135 us). The mux
          * selection never changes, so there is no rotation to keep in step:
          * every access re-commands ADC_PAIR (see adc168_read()).
          *

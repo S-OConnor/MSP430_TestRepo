@@ -35,14 +35,17 @@ void spi_init(void)
      *   UCMST        master mode (we generate SCLK)
      *   UCSYNC       synchronous mode (SPI rather than I2C/UART)
      *   UCMSB        MSB-first bit order (the ADC shifts MSB first)
-     *   UCSSEL__SMCLK bit-clock source = SMCLK (8 MHz)
+     *   UCSSEL__SMCLK bit-clock source = SMCLK (8 MHz, divided below)
      *   UCCKPH=0, UCCKPL=0 (not set) -> CPOL=0/CPHA=1 as explained above.
      *   UCMODE_0 (not set) -> 3-pin SPI: no STE line, ~CS is a plain GPIO. */
     UCB0CTLW0 |= UCMST | UCSYNC | UCMSB | UCSSEL__SMCLK;
 
-    /* Bit-rate divider: SCLK = SMCLK / UCB0BRW. With the default divider of
-     * 1 that is 8 MHz (period 125 ns) — inside the ADC's 0.5..20 MHz
-     * half-clock window. See ADC_SCLK_DIV in board.h for the slow-down knob. */
+    /* Bit-rate divider: SCLK = SMCLK / UCB0BRW. ADC_SCLK_DIV is 16, so
+     * 8 MHz / 16 = 0.5 MHz (period 2 us) — the bottom end of the ADC's
+     * 0.5..20 MHz half-clock window (SBASAW9 §6.3.1.4). Running at the slow
+     * end maximises setup/hold margin on the jumper wires to the EVM; the
+     * cost is bus time, ~135 us per tick, still far inside the 10 ms budget.
+     * See ADC_SCLK_DIV in board.h to change the rate. */
     UCB0BRW = ADC_SCLK_DIV;
 
     /* Release from reset: SCLK now sits idle-low, ready to burst. */
@@ -62,8 +65,10 @@ uint8_t spi_xfer(uint8_t tx)
 
     /* UCRXIFG sets when the 8th bit has been captured and the received byte
      * has moved into UCB0RXBUF — i.e. the burst is complete and SCLK is
-     * guaranteed to be back at idle-low. ~1 us at 8 MHz, so a blocking wait
-     * is simpler and cheaper than interrupt plumbing here. */
+     * guaranteed to be back at idle-low. ~16 us at 0.5 MHz — the CPU spins
+     * through that, but at ~135 us of bus traffic per 10 ms tick it is still
+     * under 2 % duty, so a blocking wait stays simpler and cheaper than
+     * interrupt plumbing here. */
     while (!(UCB0IFG & UCRXIFG)) {
     }
 

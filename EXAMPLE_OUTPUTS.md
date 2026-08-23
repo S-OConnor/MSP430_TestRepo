@@ -29,8 +29,8 @@ proof that ~CS, RD, CLOCK, SDI and SDOA are all wired and phased correctly, and
 its result is what the firmware parks in `g_cfg` for the debugger.
 
 **This is also the entire bus signature of the idle phase.** Before the button
-press, the two accesses below are all that ever appears on the wire: ~6 µs of
-traffic, then ~1 s of silence, forever. Trigger on **RD** (J5.11) rather than
+press, the two accesses below are all that ever appears on the wire: ~100 µs
+of traffic, then ~1 s of silence, forever. Trigger on **RD** (J5.11) rather than
 CONVST — CONVST does not move at all until streaming starts. Each repeat
 refreshes `g_cfg` and bumps `g_cfg_cycles`; a readback that stops matching
 bumps `g_err_cfg` and lights the red LED.
@@ -61,8 +61,8 @@ read_word()         ->  ADC_RD_PULSE();
 Inside each `spi_xfer()` the CLOCK lane shows its 8 real cycles, and MOSI/MISO
 show the actual bit levels for the byte named above them (MSB first). Between
 bursts the clock is parked low — that gap is where the strobes move. At
-`ADC_SCLK_DIV = 1` a cycle is 125 ns, so the 48 clocks are ~6 µs of bus time;
-the gaps are CPU overhead, not specified delays.
+`ADC_SCLK_DIV = 16` a cycle is 2 µs (0.5 MHz), so the 48 clocks are ~96 µs of
+bus time; the gaps are CPU overhead, not specified delays.
 
 | Signal | Pin | Behaviour during a register access |
 |---|---|---|
@@ -95,7 +95,7 @@ lights the error LED (red, P4.6) before the first tick.
 
 ## An acquisition burst
 
-This is what the firmware does 99.902 times a second **once streaming has been
+This is what the firmware does 100 times a second **once streaming has been
 started with a button**, and the only place the conversion results appear.
 Probe **SDOA** (EVM J5.1) for data and trigger on **CONVST** (J5.13), rising
 edge, single shot — CONVST pulses once per tick with ~10 ms of quiet either
@@ -120,9 +120,9 @@ SDI    [0x40 0x00 0x00]----------[0x40 0x00 ...]---------
 | **SDOA** | P1.7 ← J5.1 | Silent until RD falls, then 40 bits: frame A (CHA1) then frame B (CHB1). |
 | **SDI** | P1.6 → J5.15 | `0x40 0x00` — the constant channel command (`C = 01`, `R = 00` "update C only"). Latched during the readout's first 16 clocks. |
 
-At `ADC_SCLK_DIV = 1` a clock cycle is 125 ns, so the two bursts are 3 µs and
-5 µs; the gaps between them are CPU overhead, not specified delays. The whole
-burst is ~20 µs out of a 10.01 ms tick.
+At `ADC_SCLK_DIV = 16` a clock cycle is 2 µs (0.5 MHz), so the two bursts are
+48 µs and 80 µs; the gaps between them are CPU overhead, not specified delays.
+The whole burst is ~135 µs out of a 10.00 ms tick.
 
 ### Turning the readout into numbers
 
@@ -166,9 +166,8 @@ LED when it fails.
 | Pressed a button, nothing changed | The press was not seen: wrong pin, pull-up not enabled, or `LOCKLPM5` still set. | `g_phase` stays 0; check the `P4REN`/`P1REN` setup in [src/clocks.c](src/clocks.c) |
 | Error LED lights while idle, `g_err_cfg` climbing | The link was fine at init and broke afterwards — a wire pulled loose, EVM power lost. | `g_cfg` holds the latest raw readback; check J5 wiring and EVM supplies |
 | Heartbeat LED dark, no bus traffic | The tick never runs — firmware stuck before `timer_init()`, or the timer never fires. | Halt with `mspdebug`, read `g_tick` and `g_status` |
-| Error LED on from power-up, `g_status = 0x0001` | The 32.768 kHz crystal never started within the ~1 s window; the tick fell back to the DCO-derived 100 Hz. Bus traffic continues, timebase accuracy drops to ~±2 %. | LaunchPad crystal **Y4** on PJ.4/PJ.5 |
 | Error LED on, `g_status = 0x0002`, `g_cfg = 0x0000` | Link check failed with SDOA stuck low — nothing is driving the line. | ~CS wiring, EVM DVDD, PHI controller board still fitted |
 | Error LED on, `g_status = 0x0002`, `g_cfg = 0xFFFF` | Link check failed with SDOA stuck high. | SDOA wiring / pull-up, EVM power |
 | Error LED on, `g_cfg = 0x1040`-ish | The link works but a mode bit came back wrong — usually the M0 strap. | J5.17 → GND strap (M1 stays pulled high) |
-| SDOA frames fail the constant-bit check; `g_err_frame` climbing | Bit alignment is off: clock phase, strobe timing, or long jumper wires at 8 MHz. | Lower `ADC_SCLK_DIV` in [src/board.h](src/board.h) to 2 (4 MHz) or 4 (2 MHz) |
+| SDOA frames fail the constant-bit check; `g_err_frame` climbing | Bit alignment is off: clock phase or strobe timing. SCLK is already at 0.5 MHz, the slowest the ADC allows, so jumper length and clock speed are ruled out. | Strobe wiring (CONVST/RD), the M0 strap, SDOA continuity |
 | BUSY never falls; `g_err_busy` climbing | Conversion not completing, or BUSY not wired. | J5.5 → P1.5, EVM AVDD, CONVST reaching J5.13 |

@@ -101,7 +101,7 @@ text(LEFT, Y_TITLE, "Reading the ADC CONFIG register — one column per statemen
      size=18, weight="700", anchor="start", family=SANS)
 text(LEFT, Y_SUB, "adc168_config_cycle(): write CONFIG 0x1041, then clock the "
      "reply off SDOA — the init link check, and the idle phase once a second.  "
-     "SCLK 8 MHz, CPOL=0/CPHA=1, MSB first.",
+     "SCLK 0.5 MHz, CPOL=0/CPHA=1, MSB first.",
      size=11.5, fill=DIM, anchor="start", family=SANS)
 
 # ---- function brackets + per-column code labels -------------------------

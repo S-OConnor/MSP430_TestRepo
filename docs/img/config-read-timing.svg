@@ -2,7 +2,7 @@
 <defs><pattern id="xc" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#dfe5ec"/><line x1="0" y1="0" x2="0" y2="6" stroke="#c3ccd6" stroke-width="1.4"/></pattern></defs>
 <rect width="1128" height="541" fill="#ffffff"/>
 <text x="14.0" y="32.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#101418" text-anchor="start">Reading the ADC CONFIG register — one column per statement</text>
-<text x="14.0" y="53.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="11.5" font-weight="400" fill="#67727e" text-anchor="start">adc168_config_cycle(): write CONFIG 0x1041, then clock the reply off SDOA — the init link check, and the idle phase once a second.  SCLK 8 MHz, CPOL=0/CPHA=1, MSB first.</text>
+<text x="14.0" y="53.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="11.5" font-weight="400" fill="#67727e" text-anchor="start">adc168_config_cycle(): write CONFIG 0x1041, then clock the reply off SDOA — the init link check, and the idle phase once a second.  SCLK 0.5 MHz, CPOL=0/CPHA=1, MSB first.</text>
 <rect x="242.0" y="118.0" width="422.0" height="318.0" fill="#f6f8fa"/>
 <line x1="242.0" y1="92.0" x2="664.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
 <line x1="242.0" y1="87.0" x2="242.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
