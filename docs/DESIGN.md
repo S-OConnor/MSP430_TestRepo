@@ -1,29 +1,176 @@
-# Detailed Design (from first principles)
+# Design
 
-This document explains the whole system assuming you have never used an ADC
-or SPI before. It builds up the concepts first, then walks through exactly
-what the firmware does and why. Read [ARCHITECTURE.md](ARCHITECTURE.md)
-first if you only want the summary.
+The complete "what, why and how" of the firmware, in one document: a summary
+of the system and its decisions first, then the background needed to follow
+them, then the implementation in detail, then how to observe and diagnose the
+running system.
+
+Read **Part I** alone if you only want the overview. Read **Part II** if you
+have never worked with an ADC or SPI before — everything after it assumes
+those ideas. For the phased build plan and risk register, see
+[PLAN.md](PLAN.md).
 
 Contents:
 
-1. [What an ADC is](#1-what-an-adc-is)
-2. [What SPI is](#2-what-spi-is)
-3. [Why this ADC is not a "normal" SPI device](#3-why-this-adc-is-not-a-normal-spi-device)
-4. [The trick that makes SPI work anyway: the gated clock](#4-the-trick-that-makes-spi-work-anyway-the-gated-clock)
-5. [The MSP430 side: clocks, pins, peripherals](#5-the-msp430-side-clocks-pins-peripherals)
-6. [Talking to the ADC, step by step](#6-talking-to-the-adc-step-by-step)
-7. [Reading two channels: why a pair](#7-reading-two-channels-why-a-pair)
-8. [Timing: the 100 Hz tick](#8-timing-the-100-hz-tick)
-9. [Getting at the data: the scope](#9-getting-at-the-data-the-scope)
-10. [Putting it together: one tick, start to finish](#10-putting-it-together-one-tick-start-to-finish)
-11. [Number formats and how to interpret the output](#11-number-formats-and-how-to-interpret-the-output)
-12. [What can go wrong and how the firmware reacts](#12-what-can-go-wrong-and-how-the-firmware-reacts)
-13. [Glossary](#13-glossary)
+**Part I — Overview**
+1. [What the system does](#1-what-the-system-does)
+2. [Key design decisions](#2-key-design-decisions)
+3. [Software structure](#3-software-structure)
+4. [Runtime behaviour](#4-runtime-behaviour)
+
+**Part II — Background from first principles**
+
+5. [What an ADC is](#5-what-an-adc-is)
+6. [What SPI is](#6-what-spi-is)
+7. [Why this ADC is not a "normal" SPI device](#7-why-this-adc-is-not-a-normal-spi-device)
+8. [The trick that makes SPI work anyway: the gated clock](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)
+
+**Part III — The implementation**
+
+9. [The MSP430 side: clocks, pins, peripherals](#9-the-msp430-side-clocks-pins-peripherals)
+10. [Talking to the ADC, step by step](#10-talking-to-the-adc-step-by-step)
+11. [Reading two channels: why a pair](#11-reading-two-channels-why-a-pair)
+12. [Timing: the 100 Hz tick](#12-timing-the-100-hz-tick)
+13. [Putting it together: one tick, start to finish](#13-putting-it-together-one-tick-start-to-finish)
+
+**Part IV — Observing and diagnosing**
+
+14. [Getting at the data: the scope](#14-getting-at-the-data-the-scope)
+15. [Number formats: decoding a readout burst by hand](#15-number-formats-decoding-a-readout-burst-by-hand)
+16. [What can go wrong and how the firmware reacts](#16-what-can-go-wrong-and-how-the-firmware-reacts)
+17. [Glossary](#17-glossary)
 
 ---
 
-## 1. What an ADC is
+# Part I — Overview
+
+## 1. What the system does
+
+An MSP430FR5969 microcontroller (on a TI LaunchPad board) drives an external
+precision ADC (TI ADC168M102R-SEP on its evaluation board) to sample two
+analog voltages roughly 100 times per second.
+
+The two inputs are **CHA1** (EVM header J2.5) and **CHB1** (J1.5). They sit
+on the ADC's two independent converters at the same mux position, so one
+conversion digitizes both *at the same instant* and one readout returns
+both. Which pair is acquired is the `ADC_PAIR` constant in `board.h`.
+
+**There is no output path off the MCU.** The results are read directly off
+the ADC bus with a scope or logic analyzer — SDOA carries both 16-bit results
+during the 40-clock readout burst that follows every tick. The firmware's only
+job is to run that bus traffic reliably at 99.902 Hz and to flag trouble on
+two LEDs.
+
+```mermaid
+flowchart LR
+    AIN["2 analog inputs<br/>CHA1 = EVM J2.5<br/>CHB1 = EVM J1.5<br/>0..5 V each"]
+    PWR["bench supplies<br/>+5 V, +3.3 V, +/-8 V"]
+    XTAL["external 32.768 kHz<br/>square wave"]
+    USB["USB<br/>power + mspdebug flash"]
+
+    subgraph EVM["ADC168M102R-SEP EVM"]
+        ADC["ADC168M102R<br/>2 converters, Mode II"]
+    end
+
+    subgraph LP["MSP430FR5969 LaunchPad"]
+        MCU["firmware<br/>tick + ADC driver"]
+    end
+
+    SCOPE["scope / logic analyzer<br/>THE measurement point"]
+
+    AIN --> ADC
+    PWR --> ADC
+    XTAL -->|LFXIN bypass| MCU
+    USB --> MCU
+
+    MCU -->|"CLOCK, SDI"| ADC
+    MCU -->|"CONVST, RD, ~CS"| ADC
+    ADC -->|SDOA| MCU
+    ADC -->|BUSY| MCU
+
+    ADC -.->|"SDOA carries both 16-bit<br/>results once per tick"| SCOPE
+    MCU --> LED1["LED1 red: heartbeat"]
+    MCU --> LED2["LED2 green: error"]
+```
+
+## 2. Key design decisions
+
+| Decision | Choice | Why |
+|---|---|---|
+| ADC interface | eUSCI_B0 SPI at 8 MHz for CLOCK/SDI/SDOA + three GPIO strobes | The ADC's clock doubles as its conversion clock and the datasheet permits a gated ("burst") clock — which is exactly what an SPI master produces ([§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)). 8 MHz is the closest DCO-derivable rate at or below the requested 10 MHz. |
+| ADC operating mode | Mode II (M0 strapped low), special-read (SR=1), pseudo-differential (PDE=1) | One RD strobe + 40 clocks returns both converters' results — exactly the two channels wanted — so a tick is a single conversion. The internal 2.5 V reference is routed as common mode by software, so the EVM needs no jumper changes. |
+| Input mux | Pseudo-differential **4:1** configuration (`PDE=1`, datasheet Table 6-2), channel picked by CONFIG `C[1:0]` | Gives four single-ended inputs per converter measured against a common mode, which is what this application wants. `M0 = 0` keeps selection *manual* through `C[1:0]`; the SEQFIFO sequencer applies only to automatic mode (`M0 = 1`) and is left at its reset default. |
+| Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
+| Sample timebase | External 32.768 kHz square wave into LFXIN (bypass) → Timer_A0, period 328 → 99.902 Hz | User requirement (external low-frequency source). 100.000 Hz is not an integer division of 32768; 328 is the closest. |
+| Fallback | If the 32 kHz source is missing: internal DCO timer at exactly 100 Hz, status flag set | Never hang; make the degraded state visible on the error LED and in `g_status`. |
+| Readout | None from the MCU — the ADC bus itself is the measurement point | The scope has to be on the bus during bring-up anyway, and SDOA already carries both results in full 16-bit resolution. Dropping the UART removes a peripheral, an ISR, a 256-byte buffer and a whole class of "did the host keep up?" failure from the tick path. |
+| Status reporting | Two LEDs, plus every computed value held in a `volatile` global for the debugger | Enough to tell "alive and ticking" from "something is wrong" at a glance; `mspdebug` supplies the detail when the LED says to look. |
+| Integrity | Every ADC frame carries fixed indicator/zero bits which are checked on every read | Cheap, continuous self-test of wiring and clock phase; failures are counted in the `errs` column and light the error LED. |
+| Toolchain | TI msp430-gcc via CMake cross file; Docker/Podman dev image | Reproducible builds on any host; no IDE dependency. |
+
+## 3. Software structure
+
+```
+src/
+├── board.h        pin map, tunables (channel pair, SCLK divider, tick
+│                 period), pin macros
+├── clocks.c/.h    GPIO setup, LPM5 unlock, FRAM wait state, DCO/LFXT clocks
+├── spi.c/.h       eUSCI_B0 SPI master, blocking byte exchange
+├── adc168m102.c/.h ADC driver: init sequence, conversion + readout
+└── main.c         tick timer, sample loop, LEDs, observable globals
+```
+
+Layering (arrows = "uses"):
+
+```mermaid
+flowchart TD
+    main["main.c<br/>tick timer, sample loop,<br/>LEDs, observable globals"]
+    clocks["clocks.c/.h<br/>GPIO, LPM5 unlock,<br/>FRAM wait state, DCO/LFXT"]
+    adc["adc168m102.c/.h<br/>init sequence,<br/>conversion + readout"]
+    spi["spi.c/.h<br/>eUSCI_B0 SPI master,<br/>blocking byte exchange"]
+    board["board.h<br/>pin map + tunables<br/>+ msp430.h device header"]
+
+    main --> clocks
+    main --> adc
+    adc --> spi
+    clocks --> board
+    adc --> board
+    spi --> board
+    main --> board
+```
+
+## 4. Runtime behaviour
+
+```mermaid
+flowchart TD
+    PO([power-on]) --> WDT["stop watchdog"]
+    WDT --> CLK["clocks: 16 MHz MCLK,<br/>8 MHz SMCLK, 32 kHz ACLK"]
+    CLK --> LFXT{"external 32 kHz<br/>alive?"}
+    LFXT -->|yes| SPI
+    LFXT -->|"no (bounded retry)"| FB["tick from DCO at 100 Hz<br/>g_status: ST_NO_LFXT set<br/>error LED on"] --> SPI
+    SPI["init eUSCI_B0 SPI"] --> AINIT["ADC reset / config /<br/>CONFIG readback link check"]
+    AINIT --> OK{"readback mode bits<br/>11:4 == 0x04?"}
+    OK -->|yes| T0
+    OK -->|no| NOLINK["g_status: ST_ADC_NOLINK set<br/>error LED on, keep running"] --> T0
+    T0["start Timer_A0"] --> SLEEP
+
+    SLEEP["sleep in LPM0"] -->|"timer ISR every ~10 ms:<br/>set flag, wake CPU"| READ
+    READ["adc168_read:<br/>CONVST, 24 clocks,<br/>wait BUSY low, RD,<br/>40 clocks, parse + validate"] --> VALID{"frame valid?"}
+    VALID -->|yes| PUB["publish g_sample_a / g_sample_b / g_tick"]
+    VALID -->|no| ERR["both samples = -32768<br/>g_err_frame / g_err_busy++<br/>latch error LED"] --> PUB
+    PUB --> LEDS["heartbeat LED toggles<br/>every 50 ticks = 1 Hz"] --> SLEEP
+```
+
+The scope sees one ~20 µs burst per tick, 10 ms apart.
+
+Per-tick budget: ~20 µs on the ADC bus plus a few µs of bookkeeping, then the
+CPU sleeps. CPU utilisation is well under 1 %.
+
+---
+
+# Part II — Background from first principles
+
+## 5. What an ADC is
 
 An **analog-to-digital converter** measures a voltage and produces a number.
 Ours is 16-bit: the number ranges over 65 536 distinct values, so across a
@@ -54,16 +201,25 @@ The ADC168M102R-SEP contains **two** independent 16-bit converters, "A" and
 "B", that snapshot at exactly the same instant. In front of each sits a
 4-way switch (multiplexer, "mux"):
 
-```
-  CHA0 ─┐
-  CHA1 ─┤ mux ──> converter A ──> result A
-  CHA2 ─┤
-  CHA3 ─┘
-                                             (both triggered by CONVST)
-  CHB0 ─┐
-  CHB1 ─┤ mux ──> converter B ──> result B
-  CHB2 ─┤
-  CHB3 ─┘
+```mermaid
+flowchart LR
+    A0["CHA0"] --> MA
+    A1["CHA1"] --> MA
+    A2["CHA2"] --> MA
+    A3["CHA3"] --> MA
+    MA{{"mux A<br/>position = C[1:0]"}} --> CA["converter A"] --> RA["result A"]
+
+    B0["CHB0"] --> MB
+    B1["CHB1"] --> MB
+    B2["CHB2"] --> MB
+    B3["CHB3"] --> MB
+    MB{{"mux B<br/>position = C[1:0]"}} --> CB["converter B"] --> RB["result B"]
+
+    CONVST(["CONVST rising edge"]) -.->|"freezes both<br/>at the same instant"| CA
+    CONVST -.-> CB
+
+    style A1 stroke-width:3px
+    style B1 stroke-width:3px
 ```
 
 We tell it which mux position to use (0, 1, 2 or 3), and one conversion
@@ -72,7 +228,7 @@ then delivers **channel pair k = (CHAk, CHBk)**.
 This firmware needs only **two** channels, and it picks them from the same
 mux position: **CHA1 and CHB1** (pair 1). That choice is what makes the
 whole acquisition a single conversion per tick — see
-[section 7](#7-reading-two-channels-why-a-pair).
+[section 11](#11-reading-two-channels-why-a-pair).
 
 ### Pseudo-differential inputs and common mode
 
@@ -110,7 +266,7 @@ to 2.5 V, giving a ±2.5 V range around 2.5 V — i.e. 0 V to 5 V:
 
 ---
 
-## 2. What SPI is
+## 6. What SPI is
 
 **SPI** (Serial Peripheral Interface) is a simple way for two chips to
 exchange bytes over a few wires. One side is the **master** (it generates
@@ -154,7 +310,7 @@ An 8 MHz clock means each bit takes 125 ns, a byte 1 µs.
 
 ---
 
-## 3. Why this ADC is not a "normal" SPI device
+## 7. Why this ADC is not a "normal" SPI device
 
 A typical SPI sensor has a tidy protocol: pull ~CS low, send a command
 byte, read back some bytes, release ~CS. This ADC is different in three
@@ -181,7 +337,7 @@ So the ADC has seven wires to us: CLOCK, SDI, SDOA, ~CS, CONVST, RD, BUSY.
 
 ---
 
-## 4. The trick that makes SPI work anyway: the gated clock
+## 8. The trick that makes SPI work anyway: the gated clock
 
 Because SCLK is also the conversion clock, one might think we need a
 free-running clock signal. We do not. The datasheet (§6.3.1.4) says the
@@ -211,9 +367,11 @@ There are two subtle consequences the driver handles explicitly:
 
 ---
 
-## 5. The MSP430 side: clocks, pins, peripherals
+# Part III — The implementation
 
-### 5.1 The MSP430FR5969 in one paragraph
+## 9. The MSP430 side: clocks, pins, peripherals
+
+### 9.1 The MSP430FR5969 in one paragraph
 
 A 16-bit microcontroller with 64 KB of FRAM (non-volatile memory that is
 also writable like RAM), 2 KB SRAM, and a set of on-chip peripherals. The
@@ -222,13 +380,17 @@ tick), and the **clock system** that generates the CPU and peripheral
 clocks. That is deliberately the whole list — there is no serial peripheral
 in this firmware.
 
-### 5.2 Clock tree
+### 9.2 Clock tree
 
-```
- external 32.768 kHz  ─(LFXIN, bypass mode)──> ACLK  32768 Hz ──> Timer_A0
-                                                                   (sample tick)
- internal DCO 16 MHz ──┬──────────────────────> MCLK  16 MHz  ──> CPU
-                       └──(÷2)────────────────> SMCLK  8 MHz  ──> SPI clock
+```mermaid
+flowchart LR
+    X["external 32.768 kHz<br/>square wave"] -->|"LFXIN, bypass mode"| ACLK["ACLK<br/>32768 Hz"]
+    ACLK --> TA0["Timer_A0<br/>CCR0 = 327 -> 99.902 Hz<br/>sample tick"]
+
+    DCO["internal DCO<br/>16 MHz"] --> MCLK["MCLK<br/>16 MHz"] --> CPU["CPU<br/>+ 1 FRAM wait state"]
+    DCO -->|"/2"| SMCLK["SMCLK<br/>8 MHz"] --> SPI["eUSCI_B0 SPI<br/>/1 -> 8 MHz SCLK = ADC CLOCK"]
+
+    SMCLK -.->|"fallback if the 32 kHz<br/>source is missing: /8 = 1 MHz,<br/>period 10000 -> 100 Hz"| TA0
 ```
 
 - **DCO** = digitally-controlled oscillator, the chip's internal RC clock.
@@ -244,7 +406,7 @@ in this firmware.
   DCO-based tick, flagging the condition (`ST_NO_LFXT`) rather than
   hanging.
 
-### 5.3 Pin map
+### 9.3 Pin map
 
 | MSP430 pin | Function | Wire to ADC (EVM J5 pin) |
 |---|---|---|
@@ -282,9 +444,9 @@ SDOA only.
 
 ---
 
-## 6. Talking to the ADC, step by step
+## 10. Talking to the ADC, step by step
 
-### 6.1 The command word
+### 10.1 The command word
 
 Every 16-bit word we send to the ADC (during the 16-clock window after an
 RD strobe) is a **CONFIG register write**. Its fields, MSB first:
@@ -298,8 +460,8 @@ The ones we use:
 
 | Field | Meaning | Our value |
 |---|---|---|
-| C | which channel pair to convert **next** | 0..3, rotates |
-| R | 00 = "only update C"; 01 = "rewrite the whole register" | 01 at init, 00 during scanning |
+| C | which channel pair to convert **next** | `ADC_PAIR` (01) — a compile-time constant, re-sent on every access |
+| R | 00 = "only update C"; 01 = "rewrite the whole register" | 01 at init, 00 in the per-conversion command |
 | SR | special read: one RD delivers *both* converters' results | 1 |
 | PDE | pseudo-differential (8 single inputs vs common mode) | 1 |
 | CID | 1 = omit the indicator bits from frames | 0 (we want them for checking) |
@@ -308,7 +470,7 @@ The ones we use:
 The pattern for the "next word goes to register X" actions is a two-step
 write: first the CONFIG word carrying the address, then the value.
 
-### 6.2 The initialization sequence (`adc168_init()`)
+### 10.2 The initialization sequence (`adc168_init()`)
 
 ```
  1. ~CS low                       enable the interface, stays low forever
@@ -325,13 +487,40 @@ write: first the CONFIG word carrying the address, then the value.
 10. two throw-away conversions    flush the "one read access late" pipeline
 ```
 
+As a conversation between the two chips:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as MSP430 (adc168_init)
+    participant A as ADC168M102R
+
+    M->>A: ~CS low (stays low forever)
+    M->>A: write 0x0004  — soft reset, A=0100
+    M->>A: write 0x1041  — R=01, PDE=1, A=0001 "send CONFIG back"
+    M->>A: RD strobe + 3 bytes of clock
+    A-->>M: CONFIG readback
+    alt bits 11:4 == 0x04
+        Note over M: link OK
+    else mismatch (open wire / unpowered / wrong strap)
+        Note over M: g_status = ST_ADC_NOLINK,<br/>raw value parked in g_cfg,<br/>error LED on before the first tick
+    end
+    M->>A: write 0x5140  — R=01, SR=1, PDE=1, C=ADC_PAIR
+    M->>A: write 0x1142 then 0x03FF — REFDAC1 on, 2.5 V
+    M->>A: write 0x1145 then 0x03FF — REFDAC2 on, 2.5 V
+    M->>A: write 0x114C then 0xFF00 — REFCM: all channels use REFIO1
+    Note over M,A: wait 10 ms — reference caps settle (t_REFON = 8 ms)
+    M->>A: two throw-away conversions
+    A-->>M: discarded (flushes the "one read access late" pipeline)
+```
+
 Step 4 is the **link check**: if MISO is dead (open wire, ADC unpowered,
 wrong strap) we read all-zeros or all-ones and the mode bits will not
 match — the firmware then sets `ST_ADC_NOLINK`, lights the error LED before
 the first tick, and parks the raw value in `g_cfg` for the debugger. Note
-that `g_cfg` is the *link-check* readback (`0x1041`), captured at step 4 —
-before the operating word of step 5 is written, so it does not carry the
-channel selection.
+that `g_cfg` is the *link-check* readback (expected `0x1041`), captured at
+step 4 — before the operating word of step 5 is written, so it does not
+carry the channel selection.
 
 Steps 6–8 matter because the internal references are **off by default**;
 without them the ADC would convert against nothing. Step 8 is what makes the
@@ -350,13 +539,13 @@ keeps `ADC_PAIR` a one-line change.
 > 0". Leaving it alone also satisfies REFCM's "set this register after
 > setting the SEQFIFO register" ordering note for free.
 
-### 6.3 One conversion + readout (`adc168_read()`)
+### 10.3 One conversion + readout (`adc168_read()`)
 
 ```
    CONVST  _|‾|________________________________________________
    CLOCK   ____xxxxxxxxxxxxxxxxxxxxxxxx____xxxxxxxxxx...xxxx____
                ^ 24 conversion clocks       ^ 40 readout clocks
-   BUSY    ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|______________________________
+   BUSY    ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|______________________________
    RD      _______________________________|‾|__________________
    SDOA    ---------------------------------[frame A ][frame B ]
    SDI     [pair cmd]----------------------------[pair cmd]---
@@ -389,14 +578,46 @@ keeps `ADC_PAIR` a one-line change.
    The 16-bit results are extracted with shifts and masks; the six fixed
    bits (two per boundary) are compared against their required values.
    If any is wrong, the alignment is off and the sample is rejected
-   (`ADC168_ERR_BAD_FRAME`).
+   (`ADC168_ERR_BAD_FRAME`). [Section 15](#15-number-formats-decoding-a-readout-burst-by-hand)
+   turns the same 40 bits into numbers by hand.
+
+The same access as a message sequence, including the two failure exits
+the driver can take:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as MSP430 (adc168_read)
+    participant A as ADC168M102R
+
+    M->>A: check BUSY is low
+    Note right of M: never raise CONVST<br/>during a conversion
+    M->>A: pulse CONVST (~190 ns, clock idle)
+    Note right of A: sample-and-holds freeze,<br/>conversion armed
+    M->>A: 3 dummy bytes = 24 clocks<br/>(pair command in byte 0)
+    A->>A: SAR converts (~18 clocks), BUSY high
+    A-->>M: BUSY falls
+    alt BUSY still high after the bounded wait
+        Note over M: g_err_busy++,<br/>both samples = -32768,<br/>error LED latched
+    else BUSY low
+        M->>A: pulse RD (opens 16-clock command window)
+        M->>A: 5 bytes = 40 clocks, MOSI carries the pair command
+        A-->>M: frame A (CHA1) then frame B (CHB1) on SDOA
+        M->>M: reassemble 16-bit results, check the 6 fixed bits
+        alt fixed bits wrong
+            Note over M: ADC168_ERR_BAD_FRAME,<br/>g_err_frame++, error LED latched
+        else frame valid
+            Note over M: g_sample_a / g_sample_b published
+        end
+    end
+```
 
 Total: ~64 clocks ≈ 8 µs of bus time plus a few µs of overhead — about
 20 µs, and that is the entire ADC workload of a tick.
 
 ---
 
-## 7. Reading two channels: why a pair
+## 11. Reading two channels: why a pair
 
 We want two channels. The part offers eight, arranged as four pairs, and
 the hardware always converts a whole pair at once. So there are two ways to
@@ -406,6 +627,23 @@ pick two channels:
 |---|---|---|
 | Two channels on the **same** converter (e.g. CHA1 + CHA2) | 2 — one per mux position, with the other converter's result thrown away each time | No: ~20 µs apart |
 | Two channels forming a **pair** (CHA1 + CHB1) | 1 | Yes — one CONVST freezes both |
+
+```mermaid
+flowchart TD
+    NEED["want 2 channels"] --> Q{"same mux position?"}
+
+    Q -->|"no: CHA1 + CHA2<br/>(same converter)"| TWO["tick = 2 conversions"]
+    TWO --> T1["CONVST, read pair 1<br/>keep A, discard B"]
+    T1 --> T2["CONVST, read pair 2<br/>keep A, discard B"]
+    T2 --> NOSIM["the 2 samples are ~20 µs apart<br/>and half of every conversion<br/>is thrown away"]
+
+    Q -->|"yes: CHA1 + CHB1<br/>(pair 1)"| ONE["tick = 1 conversion"]
+    ONE --> O1["one CONVST freezes both S/H"]
+    O1 --> O2["one RD + 40 clocks returns<br/>frame A and frame B"]
+    O2 --> SIM["truly simultaneous,<br/>nothing discarded,<br/>C is a compile-time constant"]
+
+    style SIM stroke-width:3px
+```
 
 This design takes the second: **CHA1 and CHB1**, i.e. pair 1. Both results
 arrive in the single 40-clock readout that `SR=1` gives us, so nothing is
@@ -434,7 +672,7 @@ field of the init CONFIG word, the C field of every per-conversion command,
 
 ---
 
-## 8. Timing: the 100 Hz tick
+## 12. Timing: the 100 Hz tick
 
 Timer_A0 counts ACLK pulses (32 768 per second) in "up mode": it counts
 0 → CCR0, fires an interrupt, and starts over. With CCR0 = 327 the period
@@ -456,11 +694,41 @@ leave that configuration asleep forever.
 
 Fallback: if the external oscillator is absent, the timer runs from
 SMCLK/8 = 1 MHz with a period of 10 000 → exactly 100 Hz, but only as
-accurate as the DCO (~±2 %). `status` bit 0x01 reports this.
+accurate as the DCO (~±2 %). `g_status` bit 0x01 reports this.
 
 ---
 
-## 9. Getting at the data: the scope
+## 13. Putting it together: one tick, start to finish
+
+```mermaid
+sequenceDiagram
+    participant T as Timer_A0 ISR
+    participant L as main loop
+    participant D as adc168_read
+    participant B as ADC bus (scope)
+    participant G as observable globals
+
+    Note over L: sleeping in LPM0
+    T->>L: t = 0 — CCR0 interrupt:<br/>g_tick_pending = 1, wake CPU
+    Note over L: t ~ 2 µs — main loop resumes
+    L->>D: t ~ 2 µs — call adc168_read
+    D->>B: CONVST / 24 clocks / BUSY / RD / 40 clocks
+    Note over B: the whole burst the scope sees<br/>(~20 µs)
+    B-->>D: frame A + frame B
+    D-->>L: t ~ 22 µs — two 16-bit results
+    L->>G: publish g_sample_a, g_sample_b, g_tick
+    Note over L: t ~ 25 µs — LED bookkeeping,<br/>back to LPM0
+    Note over T,G: t = 10.01 ms — next tick
+```
+
+CPU is awake well under 1 % of the time, and the bus is idle for 99.8 % of
+each tick — which is why a single-shot trigger on CONVST is unambiguous.
+
+---
+
+# Part IV — Observing and diagnosing
+
+## 14. Getting at the data: the scope
 
 There is no link to a PC. The ADC's results leave the *ADC*, on SDOA, and
 that wire is where you read them — the MSP430 never needs to repeat them.
@@ -472,21 +740,15 @@ perturb the sample timing.
 trigger: it pulses once per tick, with ~10 ms of quiet either side, so a
 rising-edge single-shot capture lands on a whole acquisition every time.
 CLOCK (J5.7) gives the analyzer its bit clock, and BUSY (J5.5) shows the
-conversion itself. Sample MISO on the CLOCK **falling** edge (§2).
+conversion itself. Sample MISO on the CLOCK **falling** edge
+([§6](#6-what-spi-is)).
 
 **What one tick looks like.** One 24-clock burst converts, one 40-clock
-burst reads out:
-
-```
-   CONVST  _|‾|________________________________________________
-   CLOCK   ____24 conversion clocks____40 readout clocks_______
-   BUSY    ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|_______________________________
-   RD      _______________________|‾|_________________________
-   SDOA    -------------------------[ frame A ][ frame B ]----
-```
-
-A logic analyzer with an SPI decoder set to CPOL=0/CPHA=1, MSB first, will
-give you the five readout bytes directly; §11 turns them into numbers.
+burst reads out — the waveform in
+[§10.3](#103-one-conversion--readout-adc168_read). A logic analyzer with an
+SPI decoder set to CPOL=0/CPHA=1, MSB first, will give you the five readout
+bytes directly; [§15](#15-number-formats-decoding-a-readout-burst-by-hand)
+turns them into numbers.
 
 **What the LEDs tell you.** LED1 (red, P1.0) toggles every 50 ticks, so a
 steady 1 Hz blink means the loop is running at the right rate — and it
@@ -500,36 +762,11 @@ is the fallback for anything the scope cannot show: `g_sample_a`,
 
 ---
 
-## 10. Putting it together: one tick, start to finish
+## 15. Number formats: decoding a readout burst by hand
 
-```
-  t = 0        Timer_A0 CCR0 interrupt: g_tick_pending = 1, wake CPU
-  t ≈ 2 µs     main loop resumes
-  t ≈ 2–22 µs  adc168_read()  (CONVST / 24 clk / BUSY / RD / 40 clk)
-                 <-- this is the whole burst the scope sees
-  t ≈ 22 µs    publish g_sample_a / g_sample_b / g_tick
-  t ≈ 25 µs    LED bookkeeping, back to LPM0 sleep
-  t = 10.01 ms next tick
-```
-
-CPU is awake well under 1 % of the time, and the bus is idle for 99.8 % of
-each tick — which is why a single-shot trigger on CONVST is unambiguous.
-
----
-
-## 11. Number formats: decoding a readout burst by hand
-
-The 40 readout clocks carry two 20-bit frames back to back:
-
-```
-   bit  39 38 | 37 ......... 22 | 21 20 | 19 18 | 17 .......... 2 | 1 0
-        0  0  |  result A       | 0  0  | 0  1  |  result B       | 0 0
-        ^  ^                             ^  ^
-        |  +-- converter A indicator (0) |  +-- converter B indicator (1)
-        +-- constant leading zero        +-- constant leading zero
-```
-
-As five bytes off an SPI decoder (`b0`..`b4`), that is:
+The 40 readout clocks carry two 20-bit frames back to back, laid out as in
+[§10.3](#103-one-conversion--readout-adc168_read). As five bytes off an SPI
+decoder (`b0`..`b4`), that is:
 
 ```
    CHA1 code = ((b0 & 0x3F) << 10) | (b1 << 2) | (b2 >> 6)
@@ -553,7 +790,46 @@ and `g_sample_b`. There, both reading exactly −32768 is the firmware's
 
 ---
 
-## 12. What can go wrong and how the firmware reacts
+## 16. What can go wrong and how the firmware reacts
+
+Every failure is detected, reported and *survived* — the firmware never
+hangs and never stops ticking.
+
+| Condition | Detection | Response |
+|---|---|---|
+| External 32 kHz absent | Oscillator fault flag never clears (bounded retry) | Switch tick timer to DCO, set `ST_NO_LFXT` (0x01), error LED |
+| ADC not wired / unpowered / wrong strap | CONFIG readback mismatch at init | Set `ST_ADC_NOLINK` (0x02) and light the error LED *before the first tick*; raw readback kept in `g_cfg`; keep running |
+| Conversion never completes | BUSY still high after timeout | Both channels set to −32768, `g_err_busy` incremented, error LED latched |
+| Bit misalignment on the bus | Frame indicator/zero bits wrong | Both channels set to −32768, `g_err_frame` incremented, error LED latched |
+
+### 16.1 From symptom to cause
+
+The error LED (green, P4.6) is the only "something is wrong" signal. To find
+out *what*, halt the target and read the globals — `mspdebug` then
+`md &g_status`, `g_cfg`, `g_err_frame`, `g_err_busy`, `g_sample_a/b`, `g_tick`.
+
+```mermaid
+flowchart TD
+    START([something looks wrong]) --> HB{"heartbeat LED<br/>blinking at 1 Hz?"}
+
+    HB -->|no| NOTICK["tick not running:<br/>check the 32 kHz source,<br/>halt and read g_tick"]
+    HB -->|yes| ERRLED{"error LED on?"}
+
+    ERRLED -->|no| DATA{"data on SDOA<br/>look right?"}
+    ERRLED -->|yes| STATUS{"read g_status"}
+
+    STATUS -->|0x01| S1["no external 32 kHz:<br/>running on DCO fallback tick.<br/>Check the square wave into PJ.4"]
+    STATUS -->|0x02| S2["ADC link check failed.<br/>g_cfg holds the raw readback,<br/>expect 0x1041. Check J5 wiring,<br/>supplies, M0 strap"]
+    STATUS -->|0x00| S0{"which counter<br/>is climbing?"}
+
+    S0 -->|g_err_frame| FRAME["bit misalignment:<br/>lower ADC_SCLK_DIV in board.h<br/>(risk A in PLAN.md)"]
+    S0 -->|g_err_busy| BUSY["conversion never completes:<br/>check CLOCK reaching the ADC<br/>and BUSY wiring"]
+
+    DATA -->|"wrong channel"| CHAN["check ADC_PAIR in board.h<br/>and the analog wiring:<br/>CHA1 = J2.5 = frame A,<br/>CHB1 = J1.5 = frame B"]
+    DATA -->|"rate slightly off 100 Hz"| RATE["intended: 99.902 Hz.<br/>Change TICK_PERIOD_ACLK<br/>if a different rate is wanted"]
+```
+
+### 16.2 The detail behind each leaf
 
 | Symptom | Likely cause | Firmware behaviour | What to do |
 |---|---|---|---|
@@ -563,10 +839,11 @@ and `g_sample_b`. There, both reading exactly −32768 is the firmware's
 | Frame A and frame B swapped, or a signal in neither | Analog wiring | — | CHA1 is EVM **J2** pin 5, CHB1 is **J1** pin 5 (even pins GND); check `ADC_PAIR` matches the header pins used |
 | Both channels read ≈ −32768 or ≈ 0 with inputs applied | References not enabled / not settled | — | Check init ran (error LED off), 2.5 V on EVM REFIO test points, ±8 V op-amp supplies present |
 | No bus traffic at all; heartbeat LED dark | Tick timer never fires, or the firmware never got past init | — | Confirm the 32 kHz source, then halt with `mspdebug` and read `g_tick` |
+| Rate slightly off 100 Hz | Intended — 32768 has no integer divisor giving 100.000 Hz | Ticks at 99.902 Hz | Change `TICK_PERIOD_ACLK` in `board.h` if a different rate is wanted |
 
 ---
 
-## 13. Glossary
+## 17. Glossary
 
 - **ACLK / SMCLK / MCLK** — the MSP430's auxiliary, sub-main and main
   clocks (timer, peripheral, CPU).

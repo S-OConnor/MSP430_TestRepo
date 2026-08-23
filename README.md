@@ -19,10 +19,9 @@ a whole acquisition every time. Two LEDs report health, and every value the
 firmware computes stays in a global a debugger can read.
 
 Documentation:
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — high-level overview, key
-  decisions, module structure, failure handling.
-- [docs/DESIGN.md](docs/DESIGN.md) — detailed design from first principles
-  (assumes no ADC/SPI background).
+- [docs/DESIGN.md](docs/DESIGN.md) — the full design: overview and key
+  decisions, then the ADC/SPI background from first principles, the
+  implementation in detail, and failure handling/troubleshooting.
 - [docs/PLAN.md](docs/PLAN.md) — phased implementation plan and risk register.
 - [EXAMPLE_OUTPUTS.md](EXAMPLE_OUTPUTS.md) — annotated bus timing for the CONFIG
   readback and for an acquisition, plus failure signatures.
