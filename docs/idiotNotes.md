@@ -24,8 +24,9 @@ being used. By default (after power-up), the ADC operates in half-clock mode tha
 0.5MHz to 20MHz. 
 
 "External" here means external *to the ADC chip* - the part has no oscillator of its own. It does NOT mean a 
-bench source: the MSP430's eUSCI_B0 SPI is what drives the CLOCK pin, at 0.5MHz, in gated bursts (24 clocks for 
-a register access, 40 for a readout, idle low in between - allowed by datasheet 6.3.1.4). Nothing on either 
+bench source: the MSP430's eUSCI_B0 SPI is what drives the CLOCK pin, at 0.5MHz, in gated bursts of 24 clocks 
+each - one per register access and one per conversion-result frame, idle low in between (allowed by datasheet 
+6.3.1.4). Nothing on either 
 board is clocked from outside. 0.5MHz is the slowest the ADC accepts in half-clock mode, picked for wiring 
 margin - one bit is 2us, and a whole tick's traffic is still only ~135us.
 
@@ -52,6 +53,15 @@ high)
 
 
 ## Read Data:
+Special read (SR) is NOT used - this is plain Mode II, datasheet 6.5.2.2. One read access = one RD pulse + 
+24 clocks = ONE 20-bit frame on SDOA, so the two results of a conversion need TWO read accesses: converter A's 
+frame, then converter B's. SDOA is the only data output regardless: M1 is pulled high on the EVM, and the pin 
+table above says SDOB is "active only if M1 is low".
+
+Each frame carries an A/B indicator bit (CID=0), and the firmware checks it against the frame it expected 
+rather than trusting the order - a swapped or repeated frame is counted in g_err_frame instead of quietly 
+swapping the two channels.
+
 RD and CONVST are driven as SEPARATE GPIOs here (RD = P4.2, CONVST = P2.6) so the readout is issued 
 explicitly after BUSY drops. Shorting them together is the datasheet's four-wire mode (8.2) and stays in reserve 
 as the last rung of the fix-it ladder if frames come back misaligned. The RD signal is triggered by the device on 

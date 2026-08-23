@@ -11,14 +11,14 @@
  *  The two channels are CHA<ADC_PAIR> and CHB<ADC_PAIR> (board.h; pair 1 by
  *  default = CHA1 on EVM J2.5 and CHB1 on EVM J1.5). They form one "pair", so
  *  the ADC's two converters digitize them at the SAME instant in a single
- *  conversion, and one readout returns both.
+ *  conversion; the two results are then fetched by two read accesses.
  *
- *  There is no serial output. The results are read off the ADC bus itself with
- *  a scope or logic analyzer: SDOA carries the two 20-bit frames during the
- *  40-clock readout burst. Trigger on the CONVST rising edge — it fires once
- *  per tick with ~10 ms of quiet either side, so a single-shot capture lands
- *  on a whole acquisition every time. EXAMPLE_OUTPUTS.md shows the expected
- *  trace and walks a readout burst through to two numbers.
+ *  There is no serial output. The results are read off the ADC bus itself
+ *  with a scope or logic analyzer: SDOA carries the two 20-bit frames, one per
+ *  read access. Trigger on the CONVST rising edge — it fires once per tick
+ *  with ~10 ms of quiet either side, so a single-shot capture lands on a whole
+ *  acquisition every time. EXAMPLE_OUTPUTS.md shows the expected trace and
+ *  walks a readout burst through to two numbers.
  *
  *  Health is reported on the two LaunchPad LEDs — the green one (LED2, P1.0)
  *  is the heartbeat, the red one (LED1, P4.6) the latched error light — and
@@ -36,7 +36,7 @@
  *                 probe -> a slow 0.5 Hz blink.
  *
  *    PHASE_STREAM (entered when S1 or S2 is pressed) The acquisition loop:
- *                 one conversion + 40-clock readout every tick, ~100 Hz.
+ *                 one conversion + two read accesses every tick, 100 Hz.
  *                 Heartbeat toggles every 50 ticks -> a 1 Hz blink, visibly
  *                 twice the idle rate, so the LED alone tells you which
  *                 phase the board is in.
@@ -55,10 +55,10 @@
  *  keeps one timebase for everything: the sample rate, the 1 s idle period
  *  (IDLE_CONFIG_TICKS), and the button poll/debounce interval.
  *
- *  Timing budget per 10 ms tick: ~135 us of ADC bus traffic while streaming
- *  at the 0.5 MHz SCLK (~100 us once a second while idle), a few us of
- *  bookkeeping. The CPU is awake under 2 % of the time while streaming and
- *  essentially never while idle.
+ *  Timing budget per 10 ms tick: ~150 us of ADC bus traffic while streaming
+ *  at the 0.5 MHz SCLK — three 24-clock bursts (~100 us once a second while
+ *  idle, two bursts) — plus a few us of bookkeeping. The CPU is awake under
+ *  2 % of the time while streaming and essentially never while idle.
  * =============================================================================
  */
 
@@ -215,9 +215,10 @@ int main(void)
          * on every hundredth. */
         if (g_phase == PHASE_IDLE) {
             if (button_pressed()) {
-                /* Hand over to acquisition. The probes above left SR=0 in
+                /* Hand over to acquisition. The probes above left C=00 in
                  * CONFIG, so this rewrite (and the two flush conversions it
-                 * does) is what makes the very next tick's readout valid. */
+                 * does) is what puts the mux on ADC_PAIR in time for the very
+                 * next tick's readout. */
                 adc168_start_stream();
                 g_phase = PHASE_STREAM;
                 g_tick = 0;             /* tick counter now means "samples" */
@@ -249,12 +250,13 @@ int main(void)
         }
 
         /* ---- streaming phase --------------------------------------------
-         * One conversion + readout covers both channels (~135 us). The mux
-         * selection never changes, so there is no rotation to keep in step:
-         * every access re-commands ADC_PAIR (see adc168_read()).
+         * One conversion + two read accesses covers both channels (~150 us).
+         * The mux selection never changes, so there is no rotation to keep in
+         * step: every access re-commands ADC_PAIR (see adc168_read()).
          *
          * This is the burst the scope sees: CONVST pulse, 24 clocks, BUSY
-         * falling, RD pulse, 40 clocks with both results on SDOA. */
+         * falling, then two read accesses — RD pulse plus 24 clocks each,
+         * frame A then frame B on SDOA. */
         switch (adc168_read(&va, &vb)) {
         case ADC168_OK:
             break;

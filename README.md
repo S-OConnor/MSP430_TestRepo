@@ -6,10 +6,10 @@ Firmware for the MSP-EXP430FR5969 LaunchPad that drives the **ADC168M102R-SEP**
 every tick (100.0 Hz).
 
 The two channels are a *pair* (CHA1 on converter A, CHB1 on converter B), so a
-single conversion captures both at the same instant and a single readout
-returns both — one ADC access per tick, ~135 µs of bus time at the 0.5 MHz SPI
-clock. To acquire a different pair, change `ADC_PAIR` in
-[src/board.h](src/board.h) (k → CHAk + CHBk); nothing else needs editing.
+single conversion captures both at the same instant; two read accesses then
+fetch the two results — ~150 µs of bus time per tick at the 0.5 MHz SPI clock.
+To acquire a different pair, change `ADC_PAIR` in [src/board.h](src/board.h)
+(k → CHAk + CHBk); nothing else needs editing.
 
 **Acquisition starts on a button press.** Out of reset the firmware sits in an
 idle phase: once a second it writes the ADC's CONFIG register with the "read it
@@ -24,10 +24,10 @@ off the same 100 Hz tick — `IDLE_CONFIG_TICKS` / `BTN_DEBOUNCE_POLLS` in
 [§10.4](docs/DESIGN.md#104-the-idle-probe-and-the-hand-over-to-streaming).
 
 **There is no serial output.** Results are read straight off the ADC bus with a
-scope or logic analyzer: SDOA carries both 16-bit results in the 40-clock
-readout burst that ends every tick. Trigger on the CONVST rising edge — it
-fires once per 10 ms with quiet either side, so a single-shot capture lands on
-a whole acquisition every time. Two LEDs report health, and every value the
+scope or logic analyzer: SDOA carries both 16-bit results, one per read access,
+in the two readout bursts that end every tick. Trigger on the CONVST rising
+edge — it fires once per 10 ms with quiet either side, so a single-shot capture
+lands on a whole acquisition every time. Two LEDs report health, and every value the
 firmware computes stays in a global a debugger can read.
 
 Documentation:
@@ -45,20 +45,26 @@ Documentation:
 The ADC's CLOCK pin is both conversion clock and serial clock; CONVST starts a
 conversion, RD triggers readout. The datasheet permits a **gated burst clock**,
 so eUSCI_B0 SPI (0.5 MHz, CPOL=0/CPHA=1) supplies clock bursts and shifts data
-while CONVST/RD/~CS are GPIO strobes. Mode II + special read (M0 strapped low,
-M1 pulled high, SR=1): each conversion converts one pair (CHAk + CHBk
-simultaneously), and one RD pulse + 40 clocks reads both results on SDOA.
+while CONVST/RD/~CS are GPIO strobes. Plain Mode II (M0 strapped low, M1
+pulled high, **SR=0** — special read is not used): each conversion converts one
+pair (CHAk + CHBk simultaneously), and because one read access carries one
+20-bit frame on SDOA, the two results are fetched by two read accesses — RD
+plus 24 clocks for converter A, then RD plus 24 clocks for converter B. SDOA is
+the only data output either way; M1 pulled high leaves SDOB inactive.
 `PDE=1` puts both input muxes in the **pseudo-differential 4:1 configuration**
 (datasheet Table 6-2), where CONFIG `C[1:0]` picks one of CHx0..CHx3 per
 converter against the common mode; `M0=0` keeps that selection manual, so the
 SEQFIFO sequencer (automatic mode only) stays at its reset default.
-One conversion per tick (~135 µs at 0.5 MHz) covers both channels; the mux
-selection is a compile-time constant, so there is no channel rotation. The
-idle phase uses the same vocabulary with only two of the lines moving: RD plus
-24 clocks to write `CONFIG = 0x1041`, RD plus 24 clocks to read the reply,
-once a second. Because that probe word carries `SR = 0`, the button press must
-rewrite the operating word (`0x5140`) and flush two conversions before the
-first sample is valid.
+One conversion per tick (~150 µs at 0.5 MHz) covers both channels; the mux
+selection is a compile-time constant, so there is no channel rotation. The idle
+phase uses exactly the same vocabulary — RD plus 24 clocks to write
+`CONFIG = 0x1041`, RD plus 24 clocks to read the reply, once a second — which
+is the nice consequence of dropping special read: every access on the bus is
+one RD pulse and three bytes, whether it carries a register or half a
+conversion. Because the probe word carries `C = 00`, the button press must
+rewrite the operating word (`0x5040`) and flush two conversions before the
+first sample is valid; without it the ADC would digitize pair 0 rather than
+`ADC_PAIR`.
 The internal 2.5 V references are enabled at init and routed as the
 pseudo-differential common mode (REFCM register) — no EVM jumper changes.
 Input range per channel: 2.5 V ± 2.5 V → two's-complement codes
@@ -101,8 +107,8 @@ signals, even pins GND):
 
 | ADC channel | EVM header | Where it appears on SDOA |
 |---|---|---|
-| CHA1 | **J2 pin 5** | frame A — first 20 clocks of the readout |
-| CHB1 | **J1 pin 5** | frame B — second 20 clocks |
+| CHA1 | **J2 pin 5** | frame A — the first read access after BUSY falls |
+| CHB1 | **J1 pin 5** | frame B — the second read access |
 
 Both go through the OPA4H014-SEP buffers, which need the ±8 V rails on J3/J4.
 The other six channel inputs (J2.1/3/7, J1.1/3/7) are unused and may be left
@@ -208,8 +214,9 @@ expect `0x1041`), `g_cfg_cycles` / `g_err_cfg` (idle probes done / failed),
 1. `make flash` a clean build → heartbeat LED (P1.0) blinks 0.5 Hz (idle);
    press S1 or S2 → the blink doubles to 1 Hz (streaming).
 2. Scope on P2.2 (CLOCK) → idle shows two 24-clock probe bursts once a second
-   (2 µs per clock at 0.5 MHz); after the button press, a ~135 µs acquisition
-   burst every 10 ms. `g_status` reads 0x0000 before the ADC is wired.
+   (2 µs per clock at 0.5 MHz); after the button press, a ~150 µs acquisition
+   — one 24-clock conversion burst then two 24-clock read accesses — every
+   10 ms. `g_status` reads 0x0000 before the ADC is wired.
 3. Wire the ADC per the table, power the EVM, reflash the normal build → in
    the idle phase the error LED stays off, `g_cfg` reads `0x1041` and
    `g_cfg_cycles` climbs about once a second (the link probe passing over and

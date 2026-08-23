@@ -64,10 +64,30 @@
  *
  *  Mode strapping (EVM header J5): M0 pin strapped to GND, M1 left pulled
  *  high -> "Mode II" = channel pair chosen manually by a command word, data
- *  on SDOA only. We additionally set the SR ("special read") config bit, so
- *  ONE RD pulse followed by 40 CLOCKs streams converter A's frame and then
- *  converter B's frame back-to-back on SDOA — i.e. a single readout delivers
- *  both of the channels we care about.
+ *  on SDOA only. M1 high is also what deactivates SDOB (datasheet pin table:
+ *  "Serial data output for converter B. Active only if M1 is low"), so SDOA
+ *  is the single serial output for everything this part sends back.
+ *
+ *  This build runs PLAIN Mode II — SR ("special read") stays 0 (§6.5.2.2).
+ *  One read access therefore delivers exactly ONE 20-bit frame on SDOA, and
+ *  the two results of a conversion are fetched by two successive read
+ *  accesses:
+ *
+ *      RD pulse, 24 clocks  -> converter A's frame (CHA<ADC_PAIR>)
+ *      RD pulse, 24 clocks  -> converter B's frame (CHB<ADC_PAIR>)
+ *
+ *  (24 rather than 20 because the SPI moves whole bytes; the last 4 clocks
+ *  are padding the ADC ignores.) The alternative, SR=1, packs both frames
+ *  into a single 40-clock burst; it is not used here. The cost of plain Mode
+ *  II is one extra RD strobe and 8 extra clocks per tick, and the gain is
+ *  that every access on the bus has the same shape — RD plus three bytes —
+ *  whether it is a register read or half a conversion result.
+ *
+ *  The converter each frame came from is not assumed: CID=0 keeps the A/B
+ *  indicator bit in the frame, and adc168_read() checks it against the frame
+ *  it expected. A part that returned the two frames in the other order (or
+ *  the same frame twice) fails that check and is reported as
+ *  ADC168_ERR_BAD_FRAME instead of silently swapping the two channels.
  *
  *  Frame format (CID=0, 20 clocks per converter):
  *
@@ -89,7 +109,8 @@
  *    C   next input, per the      R   write mode (00 = update C only,
  *        table above                     valid because M0=0; 01 = rewrite
  *    PD  power-down control              the whole CONFIG register)
- *    FE  FIFO enable             SR  special read (both frames per RD)
+ *    FE  FIFO enable             SR  special read (both frames per RD);
+ *                                    0 here — see the readout note above
  *    FC  full-clock mode         PDE pseudo-differential enable
  *    CID channel-ID disable      CE  2-bit counter enable
  *    A   action/address: 0000 none, 0001 read CONFIG back, 0100 soft reset,
@@ -101,7 +122,7 @@ static uint16_t s_link_readback;    /* raw CONFIG readback, published as g_cfg *
 
 /* Operating CONFIG word: the fixed mode bits plus C = ADC_PAIR, so the first
  * conversion after configuration already selects the pair we stream
- * (pair 1 -> 0x5140). */
+ * (pair 1 -> 0x5040). */
 #define ADC168_W_CONFIG \
     ((uint16_t)(ADC168_W_CONFIG_BASE | ((uint16_t)(ADC_PAIR & 0x03) << 14)))
 
@@ -130,26 +151,52 @@ static void write_word(uint16_t w)
 }
 
 /*
- * Read one 16-bit register back (used by adc168_config_cycle() only, i.e.
- * while SR is still 0 so the reply is a single 20-clock frame).
+ * One READ ACCESS — the single shape every reply from this part arrives in,
+ * now that SR is 0 (§6.5.2.2): an RD pulse, then 3 bytes = 24 gated CLOCKs.
+ *
+ * The RD falling edge makes the ADC start driving SDOA; the frame that comes
+ * back is 20 bits and the last 4 clocks are padding the part ignores:
+ *
+ *   b[0] = [lead 0][A/B ind][d15..d10]
+ *   b[1] = [d9 .. d2]
+ *   b[2] = [d1][d0][0][0][x x x x]
+ *
+ * For a register read (A=0001 etc.) the middle 16 bits are the register
+ * value; for a conversion readout they are one converter's result. The same
+ * RD pulse also opens the 16-CLOCK SDI window, so `cmd` rides out in the
+ * first byte — callers pass the channel command there, or 0x00 when there is
+ * nothing to say.
+ */
+static void read_access(uint8_t cmd, uint8_t *b)
+{
+    ADC_RD_PULSE();
+    b[0] = spi_xfer(cmd);
+    b[1] = spi_xfer(0x00);
+    b[2] = spi_xfer(0x00);
+}
+
+/* The 16 payload bits of a read access, with the leading zero, the A/B
+ * indicator and the trailing zeros stripped off. */
+static uint16_t frame_data(const uint8_t *b)
+{
+    return (uint16_t)(((uint16_t)(b[0] & 0x3Fu) << 10) |    /* d15..d10 */
+                      ((uint16_t)b[1] << 2) |               /* d9..d2   */
+                      ((uint16_t)b[2] >> 6));               /* d1..d0   */
+}
+
+/*
+ * Read one 16-bit register back (used by adc168_config_cycle() only).
  *
  * After a "read register" command (A=0001 etc.), the ADC presents the value
- * during the NEXT access: RD pulse, then the frame arrives as
- *   [2 indicator bits][16 register bits][trailing 00]
- * spread over our 3 bytes (24 clocks; the last 4 are padding).
- * Bit surgery below: drop the 2 indicator bits, keep the middle 16.
+ * during the NEXT access. The two leading bits are indicator bits rather than
+ * data, and frame_data() already drops them.
  */
 static uint16_t read_word(void)
 {
-    uint8_t b0, b1, b2;
+    uint8_t b[3];
 
-    ADC_RD_PULSE();
-    b0 = spi_xfer(0x00);                    /* [ind ind d15..d10] */
-    b1 = spi_xfer(0x00);                    /* [d9 .. d2]         */
-    b2 = spi_xfer(0x00);                    /* [d1 d0 0 0 x x x x]*/
-    return (uint16_t)(((uint16_t)(b0 & 0x3F) << 10) |   /* d15..d10 */
-                      ((uint16_t)b1 << 2) |             /* d9..d2   */
-                      ((uint16_t)b2 >> 6));             /* d1..d0   */
+    read_access(0x00, b);
+    return frame_data(b);
 }
 
 /*
@@ -159,8 +206,8 @@ static uint16_t read_word(void)
  *
  * It writes ADC168_W_LINKCHK: the mode bits we care about plus A=0001,
  * "present CONFIG on SDOA at the next read access", then fetches the reply.
- * Note SR=0 in that word, so the reply is the simple single-frame kind AND
- * the part is left NOT configured for streaming — which is exactly why
+ * That word carries C=00, so it parks the mux on pair 0 and leaves the part
+ * NOT selecting the pair we stream — which is exactly why
  * adc168_start_stream() below must run before the first real sample.
  *
  * On the scope this is a compact, unmistakable signature: two RD pulses with
@@ -188,14 +235,17 @@ bool adc168_config_ok(uint16_t raw)
 /*
  * Leave the config-probe state and arm continuous acquisition.
  *
- * Writes the real operating CONFIG (R=01 rewrite, SR=1 both frames per RD,
- * PDE=1, C=ADC_PAIR), then burns two complete conversion+read cycles because
+ * Writes the real operating CONFIG (R=01 rewrite, SR=0 plain Mode II, PDE=1,
+ * C=ADC_PAIR), then burns two complete conversion+read cycles because
  * SR/PDE/CID edits only take effect "from the next conversion with a delay of
- * one read access" (§6.5.2.2). Without that flush the first samples would be
- * read with the old SR=0 framing and fail the frame check.
+ * one read access" (§6.5.2.2) — at init PDE really does change (the software
+ * reset cleared it), so without the flush the first samples would be read
+ * against the old mux configuration.
  *
  * Called at the end of init and again every time the idle phase hands over to
- * streaming — the idle probe leaves SR=0 behind, so this is not optional.
+ * streaming. Not optional in either case: the probe word carries C=00, so
+ * without this rewrite the first conversions would digitize pair 0 instead of
+ * ADC_PAIR — the right framing, but the wrong channels.
  */
 void adc168_start_stream(void)
 {
@@ -226,8 +276,9 @@ uint8_t adc168_init(void)
      * real configuration: write CONFIG with PDE=1 plus the "read CONFIG
      * back" action (A=0001), then fetch the reply and compare the mode bits
      * we just wrote (bits 11:4 must read PD=00,FE=0,SR=0,FC=0,PDE=1,CID=0,
-     * CE=0 = 0x04). Done while SR is still 0 so the reply framing is the
-     * simple single-frame kind. A dead MISO line (0x0000/0xFFFF) fails this. */
+     * CE=0 = 0x04) — the same mode bits the operating word uses, so this
+     * probe exercises exactly the framing streaming will run in. A dead MISO
+     * line (0x0000/0xFFFF) fails this. */
     if (!adc168_config_ok(adc168_config_cycle())) {
         status |= ST_ADC_NOLINK;
     }
@@ -273,16 +324,22 @@ uint16_t adc168_link_readback(void)
 /*
  * One complete conversion + readout cycle — the entire per-tick ADC workload.
  *
- *  Timeline (0.5 MHz SCLK — 2 us per clock; total ~135 us of bus time):
+ *  Timeline (0.5 MHz SCLK — 2 us per clock; total ~150 us of bus time):
  *
- *    CONVST _|‾|__________________________________________________
- *    CLOCK  ____xxxxxxxxxxxxxxxxxxxxxxxx____xxxx...xxxx___________
- *                24 conversion clocks         40 readout clocks
- *    BUSY   ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|_________________________________
- *    RD     _______________________________|‾|_____________________
- *    SDOA   ------------------------------------[frame A][frame B]-
+ *    CONVST _|‾|_____________________________________________________
+ *    CLOCK  ____xxxxxxxxxxxx____xxxxxxxxxxxx____xxxxxxxxxxxx_________
+ *              24 conversion     24 readout      24 readout
+ *                  clocks        clocks (A)      clocks (B)
+ *    BUSY   ___|‾‾‾‾‾‾‾‾|________________________________________
+ *    RD     ___________________|‾|_____________|‾|_________________
+ *    SDOA   --------------------[ frame A ]-----[ frame B ]--------
  *
- *  The channel-select command is PIPELINED: the C field shifted during THIS
+ *  Three bursts of three bytes each: one to clock the conversion, then one
+ *  read access per converter. With SR=0 a read access yields exactly one
+ *  frame (§6.5.2.2), so converter B needs its own RD pulse — that second
+ *  strobe is the whole difference from the SR=1 arrangement.
+ *
+ *  The channel-select command is PIPELINED: the C field shifted during a
  *  readout selects the mux input for the NEXT conversion. We always send
  *  ADC_PAIR, so the selection is self-sustaining — every access re-asserts
  *  the same pair, and init already primed it through the CONFIG word.
@@ -294,8 +351,7 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
      * touch nothing else" — so a corrupted transfer can at worst convert the
      * wrong pair once, and the next access puts it straight back. */
     const uint8_t cword = ADC168_CWORD_BYTE;
-    uint8_t rx[5];
-    uint16_t ua, ub;
+    uint8_t fa[3], fb[3];
     uint16_t tries = ADC_BUSY_TIMEOUT;
 
     /* The datasheet forbids a CONVST rising edge while BUSY is high (it
@@ -328,42 +384,30 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
         return ADC168_ERR_BUSY_TIMEOUT;
     }
 
-    /* Readout: RD falling edge starts frame A; 40 clocks (5 bytes) stream
-     * frame A (CHA<ADC_PAIR>) then frame B (CHB<ADC_PAIR>) on SDOA (SR=1).
-     * Simultaneously, the first 16 clocks latch our command word from SDI. */
-    ADC_RD_PULSE();
-    rx[0] = spi_xfer(cword);        /* also: command word byte 1 */
-    rx[1] = spi_xfer(0x00);         /* also: command word byte 2 (0x00) */
-    rx[2] = spi_xfer(0x00);
-    rx[3] = spi_xfer(0x00);
-    rx[4] = spi_xfer(0x00);
+    /* Readout, two read accesses: the first RD falling edge starts converter
+     * A's frame, the second starts converter B's. Each also opens a 16-CLOCK
+     * SDI window, so the pair command rides out in both — re-asserting the
+     * same selection twice is harmless (R=00 touches nothing else). */
+    read_access(cword, fa);
+    read_access(cword, fb);
 
-    /* Reassemble the two 16-bit results from the 40-bit stream.
-     *
-     *   bit#   39 38 | 37........22 | 21 20 | 19 18 | 17.........2 | 1 0
-     *          0  0  | result A     | 0  0  | 0  1  | result B     | 0 0
-     *          rx[0]..............rx[2]...........................rx[4]
-     *
-     * Every shift is done on uint16_t: on MSP430 `int` is 16 bits, so
-     * shifting into bit 15 of a plain int would be undefined behavior. */
-    ua = (uint16_t)(((uint16_t)(rx[0] & 0x3Fu) << 10) | /* A bits 15..10 */
-                    ((uint16_t)rx[1] << 2) |            /* A bits  9..2  */
-                    ((uint16_t)rx[2] >> 6));            /* A bits  1..0  */
-    ub = (uint16_t)(((uint16_t)(rx[2] & 0x03u) << 14) | /* B bits 15..14 */
-                    ((uint16_t)rx[3] << 6) |            /* B bits 13..6  */
-                    ((uint16_t)rx[4] >> 2));            /* B bits  5..0  */
-    *a = (int16_t)ua;               /* reinterpret as two's complement */
-    *b = (int16_t)ub;
+    *a = (int16_t)frame_data(fa);   /* reinterpret as two's complement */
+    *b = (int16_t)frame_data(fb);
 
-    /* Validate every fixed bit the framing guarantees:
-     *   rx[0] bits 7:6   = 00   (leading zero + converter-A indicator 0)
-     *   rx[2] bits 5:2   = 0001 (A's trailing 00, B's leading 0, B ind. 1)
-     *   rx[4] bits 1:0   = 00   (B's trailing zeros)
+    /* Validate every fixed bit the framing guarantees, in both frames:
+     *   b[0] bit 7    = 0   (constant leading zero)
+     *   b[0] bit 6    = A/B converter indicator — 0 in the first frame,
+     *                   1 in the second. Checking it is what makes the
+     *                   "A then B" ordering an assertion rather than an
+     *                   assumption: a part that answered in the other order,
+     *                   or repeated one frame, fails here instead of
+     *                   silently swapping the two channels.
+     *   b[2] bits 5:4 = 00  (the frame's trailing zeros; bits 3:0 are the
+     *                        4 padding clocks and carry nothing)
      * Any mismatch means the bit alignment is off (wiring, clock phase,
      * strobe timing) and the numbers must not be trusted. */
-    if ((rx[0] & 0xC0u) != 0x00u ||
-        (rx[2] & 0x3Cu) != 0x04u ||
-        (rx[4] & 0x03u) != 0x00u) {
+    if ((fa[0] & 0xC0u) != 0x00u || (fa[2] & 0x30u) != 0x00u ||
+        (fb[0] & 0xC0u) != 0x40u || (fb[2] & 0x30u) != 0x00u) {
         return ADC168_ERR_BAD_FRAME;
     }
     return ADC168_OK;

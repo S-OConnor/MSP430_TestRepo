@@ -82,7 +82,7 @@ both. Which pair is acquired is the `ADC_PAIR` constant in `board.h`.
 
 **There is no output path off the MCU.** The results are read directly off
 the ADC bus with a scope or logic analyzer — SDOA carries both 16-bit results
-during the 40-clock readout burst that follows every tick. The firmware's only
+in the two read accesses that follow every tick. The firmware's only
 job is to run that bus traffic reliably at 100 Hz and to flag trouble on
 two LEDs.
 
@@ -144,7 +144,7 @@ flowchart LR
 | Decision | Choice | Why |
 |---|---|---|
 | ADC interface | eUSCI_B0 SPI at **0.5 MHz** for CLOCK/SDI/SDOA + three GPIO strobes | The ADC's clock doubles as its conversion clock and the datasheet permits a gated ("burst") clock — which is exactly what an SPI master produces ([§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)). Half-clock mode accepts 0.5–20 MHz *(ADC §6.3.1.4, p. 19)*, and this build sits at the bottom of that range: SMCLK 8 MHz ÷ `ADC_SCLK_DIV` 16. The slow clock is deliberate — 2 µs per bit is enormous setup/hold margin for jumper-wired signals, and it makes the ~190 ns CONVST/RD strobes shorter than one CLOCK period outright, satisfying the datasheet's pulse-width rule literally rather than only via the gated-clock argument (risk A in PLAN.md). One conversion still costs only ~135 µs out of a 10 ms tick, so nothing is given up. |
-| ADC operating mode | Mode II (M0 strapped low), special-read (SR=1), pseudo-differential (PDE=1) | Mode II = M0 0, M1 1: manual channel select, SDOA only *(ADC Table 6-5, p. 21)*. With SR=1 one RD strobe + 40 clocks returns both converters' results *(ADC §6.5.2.3, p. 27)* — exactly the two channels wanted — so a tick is a single conversion. The internal 2.5 V reference is routed as common mode by software, so the EVM needs no jumper changes. |
+| ADC operating mode | **Plain Mode II** (M0 strapped low), special read **off** (SR=0), pseudo-differential (PDE=1) | Mode II = M0 0, M1 1: manual channel select, SDOA only *(ADC Table 6-5, p. 21)* — M1 high is also what deactivates SDOB, so SDOA is the one serial output. With SR=0 a read access returns one 20-bit frame *(ADC §6.5.2.2, p. 26)*, so the pair's two results take two read accesses (RD + 24 clocks each) instead of one 40-clock burst. It costs one extra strobe and 8 clocks a tick; in exchange every access on the bus has the same shape — RD plus three bytes — whether it carries a register value or half a conversion, and the frame decoder is one routine rather than two. The internal 2.5 V reference is routed as common mode by software, so the EVM needs no jumper changes. |
 | Input mux | Pseudo-differential **4:1** configuration (`PDE=1`, ADC Table 6-2, p. 17), channel picked by CONFIG `C[1:0]` | Gives four single-ended inputs per converter measured against a common mode, which is what this application wants. `M0 = 0` keeps selection *manual* through `C[1:0]`; the SEQFIFO sequencer applies only to automatic mode (`M0 = 1`) *(ADC §6.3.2.1, p. 21)* and is left at its reset default. |
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
 | Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
@@ -211,7 +211,7 @@ flowchart TD
     CFGOK -->|no| CFGERR["g_err_cfg++<br/>latch error LED"] --> IDLED
     IDLED["publish g_cfg / g_cfg_cycles<br/>heartbeat LED toggles<br/>once per probe = 0.5 Hz"] --> SLEEP
 
-    PHASE -->|streaming| READ["adc168_read:<br/>CONVST, 24 clocks,<br/>wait BUSY low, RD,<br/>40 clocks, parse + validate"]
+    PHASE -->|streaming| READ["adc168_read:<br/>CONVST, 24 clocks,<br/>wait BUSY low, then<br/>RD + 24 clocks twice,<br/>parse + validate"]
     READ --> VALID{"frame valid?"}
     VALID -->|yes| PUB["publish g_sample_a / g_sample_b / g_tick"]
     VALID -->|no| ERR["both samples = -32768<br/>g_err_frame / g_err_busy++<br/>latch error LED"] --> PUB
@@ -717,7 +717,7 @@ at all (odd pins signal, even pins ground) *(EVM §2.2 and Figure 2-3, p. 5)*:
 
 | ADC channel | EVM header pin | Appears on SDOA as |
 |---|---|---|
-| CHA1 | **J2 pin 5** | frame A — first 20 clocks of the readout |
+| CHA1 | **J2 pin 5** | frame A — the first read access after BUSY falls |
 | CHB1 | **J1 pin 5** | frame B — second 20 clocks |
 
 The other six channel inputs (J2.1/3/7, J1.1/3/7) stay open, and jumpers
@@ -763,7 +763,7 @@ The ones we use:
 |---|---|---|
 | C | which channel pair to convert **next** | `ADC_PAIR` (01) — a compile-time constant, re-sent on every access |
 | R | 00 = "only update C"; 01 = "rewrite the whole register" | 01 at init, 00 in the per-conversion command |
-| SR | special read: one RD delivers *both* converters' results | 1 |
+| SR | special read: one RD delivers *both* converters' results | **0** — not used; plain Mode II, one frame per read access *(ADC §6.5.2.2)* |
 | PDE | pseudo-differential (8 single inputs vs common mode) | 1 |
 | CID | 1 = omit the indicator bits from frames | 0 (we want them for checking) |
 | A | an *action*: 0000 nothing, 0001 "read CONFIG back", 0100 software reset, x010/x101 "the next word goes to reference DAC 1/2", 1100 "the next word goes to REFCM" | varies |
@@ -781,11 +781,11 @@ CONFIG word carrying the address, then the value — illustrated in
  3. write 0x1041                  R=01, PDE=1, A=0001 -> "send CONFIG back"   \ adc168_
  4. RD + read 3 bytes             the readback arrives; check bits 11:4 == 0x04 > config_
                                   (PDE=1, all else 0). Wrong -> ST_ADC_NOLINK. / cycle()
- 5. write 0x1142 then 0x03FF      REFDAC1 <- enable, 2.5 V
- 6. write 0x1145 then 0x03FF      REFDAC2 <- enable, 2.5 V
- 7. write 0x114C then 0xFF00      REFCM   <- all channels use REFIO1 as common mode
+ 5. write 0x1042 then 0x03FF      REFDAC1 <- enable, 2.5 V
+ 6. write 0x1045 then 0x03FF      REFDAC2 <- enable, 2.5 V
+ 7. write 0x104C then 0xFF00      REFCM   <- all channels use REFIO1 as common mode
  8. wait 10 ms                    reference capacitors settle (t_REFON = 8 ms)
- 9. write 0x5140                  R=01, SR=1, PDE=1, CID=0, C=01 (real config;  \ adc168_
+ 9. write 0x5040                  R=01, SR=0, PDE=1, CID=0, C=01 (real config;  \ adc168_
                                   C = ADC_PAIR, so conversion 1 is pair 1)      > start_
 10. two throw-away conversions    flush the "one read access late" pipeline     / stream()
 ```
@@ -795,8 +795,11 @@ of them again at runtime: the probe once a second while idle, the arming pair
 once when a button is pressed ([§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming)).
 Note that the operating word is written *after* the reference registers, not
 before: the REFDAC/REFCM pointer words are themselves CONFIG writes carrying
-the same mode bits (`R=01`, `SR=1`, `PDE=1`) with `C=00`, so nothing converts
+the same mode bits (`R=01`, `SR=0`, `PDE=1`) with `C=00`, so nothing converts
 while they are in flight and step 9 is what finally installs `C = ADC_PAIR`.
+Every word in the sequence carries the same mode bits — only `C` and the
+`A` action differ — which is what makes the probe an honest rehearsal of the
+framing streaming will use.
 
 Sources for each step: soft reset *(ADC §6.4.1.4, p. 23; A = 0100 in
 Table 7-2, p. 34)*; CONFIG readback action *(ADC Table 7-2, p. 34)*; the
@@ -825,11 +828,11 @@ sequenceDiagram
     else mismatch (open wire / unpowered / wrong strap)
         Note over M: g_status = ST_ADC_NOLINK,<br/>raw value parked in g_cfg,<br/>error LED on before the first tick
     end
-    M->>A: write 0x1142 then 0x03FF — REFDAC1 on, 2.5 V
-    M->>A: write 0x1145 then 0x03FF — REFDAC2 on, 2.5 V
-    M->>A: write 0x114C then 0xFF00 — REFCM: all channels use REFIO1
+    M->>A: write 0x1042 then 0x03FF — REFDAC1 on, 2.5 V
+    M->>A: write 0x1045 then 0x03FF — REFDAC2 on, 2.5 V
+    M->>A: write 0x104C then 0xFF00 — REFCM: all channels use REFIO1
     Note over M,A: wait 10 ms — reference caps settle (t_REFON = 8 ms)
-    M->>A: write 0x5140  — R=01, SR=1, PDE=1, C=ADC_PAIR
+    M->>A: write 0x5040  — R=01, SR=0, PDE=1, C=ADC_PAIR
     M->>A: two throw-away conversions
     A-->>M: discarded (flushes the "one read access late" pipeline)
     Note over M: init leaves the part armed;<br/>main() then idles in the probe phase<br/>until a button is pressed
@@ -872,13 +875,14 @@ JP1/JP2 jumpers can stay in their default `CMx_EXT` position *(EVM §2.2, p. 5)*
 ### 10.3 One conversion + readout (`adc168_read()`)
 
 ```
-   CONVST  _|‾|________________________________________________
-   CLOCK   ____xxxxxxxxxxxxxxxxxxxxxxxx____xxxxxxxxxx...xxxx____
-               ^ 24 conversion clocks       ^ 40 readout clocks
-   BUSY    ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|______________________________
-   RD      _______________________________|‾|__________________
-   SDOA    ---------------------------------[frame A ][frame B ]
-   SDI     [pair cmd]----------------------------[pair cmd]---
+   CONVST  _|‾|_____________________________________________________
+   CLOCK   ____xxxxxxxxxxxx____xxxxxxxxxxxx____xxxxxxxxxxxx_________
+               ^ 24 conv.        ^ 24 readout    ^ 24 readout
+                 clocks            clocks (A)      clocks (B)
+   BUSY    ___|‾‾‾‾‾‾‾‾|_____________________________________________
+   RD      ___________________|‾|__________|‾|_______________________
+   SDOA    --------------------[ frame A ]--[ frame B ]--------------
+   SDI     [pair cmd]----------[pair cmd]---[pair cmd]---------------
 ```
 
 1. **Check BUSY is low.** "Do not issue a rising CONVST edge during a
@@ -893,29 +897,35 @@ JP1/JP2 jumpers can stay in their default `CMx_EXT` position *(EVM §2.2, p. 5)*
 4. **Wait for BUSY low** with a bounded loop — BUSY returns low when the
    conversion completes *(ADC Table 4-1, p. 3)*. It drops during the burst;
    the wait is a safety net that becomes an error if it times out.
-5. **Pulse RD.** The ADC starts driving frame A on SDOA and opens the
-   16-clock command window on SDI *(ADC §6.5.1, p. 24)*.
-6. **Transfer 5 bytes = 40 clocks.** With `SR = 1` a single RD pulse triggers
-   both results, "issued every 40 CLOCK cycles instead of 20"
-   *(ADC §6.5.2.3, p. 27)*. MISO returns frame A (CHA1) then frame B (CHB1);
-   MOSI carries the channel command in the first two bytes. Both channels we
-   want are in this one burst — nothing is discarded.
-7. **Reassemble and validate.** The 40 received bits are
+5. **Pulse RD, transfer 3 bytes = 24 clocks.** The falling edge starts frame
+   A on SDOA and opens the 16-clock command window on SDI *(ADC §6.5.1,
+   p. 24)*. With `SR = 0` this read access carries converter A's result and
+   nothing else *(ADC §6.5.2.2, p. 26)*; MOSI carries the channel command.
+6. **Pulse RD again, transfer 3 more bytes.** The second read access brings
+   converter B's frame. That extra strobe is the entire price of plain Mode
+   II — the alternative, `SR = 1`, would pack both frames into one 40-clock
+   burst. Neither arrangement uses SDOB: M1 is pulled high, which leaves that
+   pin inactive, so SDOA is the single serial output either way.
+7. **Reassemble and validate.** Each 24-clock access carries one 20-bit frame
    *(ADC Figure 6-7, p. 27; code format in Table 6-7, p. 24)*:
 
 ```
-   bit  39 38 | 37 ......... 22 | 21 20 | 19 18 | 17 .......... 2 | 1 0
-        0  0  |  result A       | 0  0  | 0  1  |  result B       | 0 0
-        ^  ^                             ^  ^
-        |  +-- converter A indicator (0) |  +-- converter B indicator (1)
-        +-- constant leading zero        +-- constant leading zero
+   bit  23 22 | 21 .......... 6 | 5 4 | 3 2 1 0
+        0  I  |  result         | 0 0 | padding clocks
+        ^  ^
+        |  +-- converter indicator: 0 in frame A, 1 in frame B
+        +-- constant leading zero
 ```
 
-   The 16-bit results are extracted with shifts and masks; the six fixed
-   bits (two per boundary) are compared against their required values.
-   If any is wrong, the alignment is off and the sample is rejected
-   (`ADC168_ERR_BAD_FRAME`). [Section 15](#15-number-formats-decoding-a-readout-burst-by-hand)
-   turns the same 40 bits into numbers by hand.
+   The 16-bit result is extracted with shifts and masks, and the fixed bits
+   are compared against their required values — including the indicator,
+   which must read 0 in the first frame and 1 in the second. That last test
+   is what turns "A comes back before B" from an assumption into a checked
+   fact: a part answering in the other order, or repeating one frame, is
+   rejected rather than quietly swapping the two channels. Any mismatch
+   rejects the sample (`ADC168_ERR_BAD_FRAME`).
+   [Section 15](#15-number-formats-decoding-a-readout-burst-by-hand) turns the
+   same bits into numbers by hand.
 
 The same access as a message sequence, including the two failure exits
 the driver can take:
@@ -936,10 +946,11 @@ sequenceDiagram
     alt BUSY still high after the bounded wait
         Note over M: g_err_busy++,<br/>both samples = -32768,<br/>error LED latched
     else BUSY low
-        M->>A: pulse RD (opens 16-clock command window)
-        M->>A: 5 bytes = 40 clocks, MOSI carries the pair command
-        A-->>M: frame A (CHA1) then frame B (CHB1) on SDOA
-        M->>M: reassemble 16-bit results, check the 6 fixed bits
+        M->>A: read access 1: pulse RD, 3 bytes = 24 clocks<br/>(MOSI carries the pair command)
+        A-->>M: frame A (CHA1) on SDOA
+        M->>A: read access 2: pulse RD, 3 bytes = 24 clocks
+        A-->>M: frame B (CHB1) on SDOA
+        M->>M: reassemble both 16-bit results, check the<br/>fixed bits and each frame's A/B indicator
         alt fixed bits wrong
             Note over M: ADC168_ERR_BAD_FRAME,<br/>g_err_frame++, error LED latched
         else frame valid
@@ -961,7 +972,7 @@ as the init link check. Two driver entry points cover it:
 | Function | What it does on the bus | Leaves CONFIG as |
 |---|---|---|
 | `adc168_config_cycle()` | `write_word(0x1041)` then `read_word()` — RD pulse + 24 clocks, twice | `SR = 0`, `C = 00`, PDE=1 (the probe word) |
-| `adc168_start_stream()` | `write_word(0x5140)`, then two complete conversion + readout cycles | `SR = 1`, `C = ADC_PAIR` (the operating word) |
+| `adc168_start_stream()` | `write_word(0x5040)`, then two complete conversion + readout cycles | `SR = 0`, `C = ADC_PAIR` (the operating word) |
 
 `adc168_config_cycle()` returns the raw readback; `adc168_config_ok()` applies
 the same bits-11:4 test the init link check uses. `main()` calls the probe
@@ -969,16 +980,16 @@ every hundredth tick, publishes the result in `g_cfg`, counts the probe in
 `g_cfg_cycles`, and counts failures in `g_err_cfg` — a probe that comes back
 wrong latches the error LED exactly like a bad frame does while streaming.
 
-**Why the hand-over cannot be skipped.** The probe word `0x1041` has `SR = 0`,
-because a register readback wants the simple single-frame reply. Acquisition
-needs `SR = 1` so that one RD pulse streams both converters' frames. So the
-idle phase necessarily leaves the part in the *wrong* mode for sampling, and
-the button press has to put it back: write `0x5140`, then burn two conversions
-because `SR`/`PDE`/`CID` edits only take effect "from the next conversion with
-a delay of one read access" *(ADC §6.5.2.2, p. 26)*. Without that flush the
-first readouts would be parsed with the old framing and fail the fixed-bit
-check — visible as `g_err_frame` jumping by one or two at the moment of the
-press, rather than as anything subtler.
+**Why the hand-over cannot be skipped.** Now that both words carry `SR = 0`,
+the probe and the operating word differ only in the channel field — but that
+is enough. The probe word `0x1041` has `C = 00`, so the idle phase leaves the
+mux parked on pair 0. The button press has to install the pair actually
+wanted: write `0x5040`, then burn two conversions, because `SR`/`PDE`/`CID`
+edits only take effect "from the next conversion with a delay of one read
+access" *(ADC §6.5.2.2, p. 26)* and `C` is itself pipelined one conversion
+deep. Skip it and the first samples come back correctly framed but from the
+wrong channels — which is the more dangerous failure of the two, because
+nothing in the frame check can catch it. The flush costs ~300 µs, once.
 
 The same function ends `adc168_init()`, so a board that is flashed, pressed
 immediately, and a board that sat idle for an hour enter streaming from
@@ -1008,15 +1019,15 @@ flowchart TD
 
     Q -->|"yes: CHA1 + CHB1<br/>(pair 1)"| ONE["tick = 1 conversion"]
     ONE --> O1["one CONVST freezes both S/H"]
-    O1 --> O2["one RD + 40 clocks returns<br/>frame A and frame B"]
+    O1 --> O2["two read accesses return<br/>frame A then frame B"]
     O2 --> SIM["truly simultaneous,<br/>nothing discarded,<br/>C is a compile-time constant"]
 
     style SIM stroke-width:3px
 ```
 
 This design takes the second: **CHA1 and CHB1**, i.e. pair 1. Both results
-arrive in the single 40-clock readout that `SR=1` gives us, so nothing is
-converted and discarded.
+come out of the one conversion — two read accesses to fetch them — so nothing
+is converted and discarded.
 
 The choice also removes a class of bug. The channel-select command is
 **pipelined**: "changing the multiplexer settings impacts the conversion
@@ -1119,7 +1130,7 @@ sequenceDiagram
     T->>L: t = 0 — CCR0 interrupt:<br/>g_tick_pending = 1, wake CPU
     Note over L: t ~ 2 µs — main loop resumes
     L->>D: t ~ 2 µs — call adc168_read
-    D->>B: CONVST / 24 clocks / BUSY / RD / 40 clocks
+    D->>B: CONVST / 24 clocks / BUSY / RD+24 / RD+24
     Note over B: the whole burst the scope sees<br/>(~135 µs)
     B-->>D: frame A + frame B
     D-->>L: t ~ 137 µs — two 16-bit results
@@ -1160,7 +1171,7 @@ sequenceDiagram
 ```
 
 And once, on the tick where the debounced press lands, a third kind: write
-`0x5140`, two flush conversions, `g_phase = PHASE_STREAM`, `g_tick = 0`, back
+`0x5040`, two flush conversions, `g_phase = PHASE_STREAM`, `g_tick = 0`, back
 to sleep — ~50 µs, no sample published. The first acquisition burst appears on
 the *next* tick, 10 ms later.
 
@@ -1186,12 +1197,13 @@ CLOCK (J5.7) gives the analyzer its bit clock, and BUSY (J5.5) shows the
 conversion itself. Sample MISO on the CLOCK **falling** edge
 ([§6](#6-what-spi-is)).
 
-**What one tick looks like.** One 24-clock burst converts, one 40-clock
-burst reads out — the waveform in
+**What one tick looks like.** Three 24-clock bursts: one converts, then one
+read access per converter — the waveform in
 [§10.3](#103-one-conversion--readout-adc168_read). A logic analyzer with an
-SPI decoder set to CPOL=0/CPHA=1, MSB first, will give you the five readout
-bytes directly; [§15](#15-number-formats-decoding-a-readout-burst-by-hand)
-turns them into numbers.
+SPI decoder set to CPOL=0/CPHA=1, MSB first, will give you the two groups of
+three readout bytes directly;
+[§15](#15-number-formats-decoding-a-readout-burst-by-hand) turns them into
+numbers.
 
 **Nothing on the bus? Press a button.** Out of reset the board is in the idle
 phase, and its signature is deliberately different: no CONVST edge at all,
@@ -1226,23 +1238,29 @@ and `g_err_cfg`.
 
 ## 15. Number formats: decoding a readout burst by hand
 
-The 40 readout clocks carry two 20-bit frames back to back, laid out as in
-[§10.3](#103-one-conversion--readout-adc168_read). As five bytes off an SPI
-decoder (`b0`..`b4`), that is:
+The two read accesses each carry one 20-bit frame, laid out as in
+[§10.3](#103-one-conversion--readout-adc168_read). Both decode identically —
+the same three bytes off an SPI decoder, the same shifts:
 
 ```
-   CHA1 code = ((b0 & 0x3F) << 10) | (b1 << 2) | (b2 >> 6)
-   CHB1 code = ((b2 & 0x03) << 14) | (b3 << 6) | (b4 >> 2)
+   code = ((b0 & 0x3F) << 10) | (b1 << 2) | (b2 >> 6)
 ```
+
+Apply it to the first access's three bytes for CHA1 and the second's for CHB1.
+(That one expression is the whole benefit of dropping special read: with
+`SR = 1` the second result straddled a byte boundary and needed its own,
+differently-shifted decode.)
 
 Both are **signed 16-bit two's complement** *(ADC Table 6-7, p. 24)*, and both
 were sampled at the same instant. Voltage ≈ 2.5 V + code × (2.5 V / 32768) = 2.5 V + code ×
 76.3 µV, so 0 V ≈ −32768, 2.5 V ≈ 0, 5 V ≈ +32767.
 
-The six constant bits (`b0 & 0xC0 == 0x00`, `b2 & 0x3C == 0x04`,
-`b4 & 0x03 == 0x00`) are the sanity check: if they are wrong, the bit
-alignment is off and the numbers mean nothing. The firmware checks them on
-every frame too, and lights the error LED when one fails.
+The constant bits are the sanity check, and they are per-frame: `b0 & 0x80 ==
+0x00` and `b2 & 0x30 == 0x00` in both, plus the indicator `b0 & 0x40`, which
+must be `0x00` in the first frame and `0x40` in the second. If any is wrong
+the bit alignment is off — or the frames arrived out of order — and the
+numbers mean nothing. The firmware runs the same checks on every frame and
+lights the error LED when one fails.
 
 In the debugger the same two values are already decoded, in `g_sample_a`
 and `g_sample_b`. There, both reading exactly −32768 is the firmware's
@@ -1368,7 +1386,7 @@ flowchart TD
 - **S1 / S2** — the LaunchPad's two push buttons, on P4.5 (left, beside the
   red LED1) and P1.1 (right, beside the green LED2). Either one starts
   acquisition; both are active low with the MCU's internal pull-up.
-- **SR (special read)** — config bit making one RD strobe deliver both
+- **SR (special read)** — config bit that would make one RD strobe deliver both
   converters' results. Set while streaming, clear during the idle probe —
   which is why the phase change has to rewrite CONFIG.
 - **Two's complement** — signed binary encoding; 0x8000 = −32768,
@@ -1401,7 +1419,8 @@ keys are defined in [Reference documents](#reference-documents).
 | 23 | §6.4.1.4 Reset | The software reset the init sequence issues first | [§10.2](#102-the-initialization-sequence-adc168_init) |
 | 24 | §6.5.1 Read Data Input (RD); Table 6-7 Output Data Format | RD starts the readout and opens the SDI window; output code is binary two's complement | [§5](#5-what-an-adc-is), [§7](#7-why-this-adc-is-not-a-normal-spi-device), [§10.3](#103-one-conversion--readout-adc168_read), [§15](#15-number-formats-decoding-a-readout-burst-by-hand) |
 | 26 | §6.5.2.2 Mode II | "Changes to the FE, SR, PDE, and CID register bits are active … with a delay of one read access" — why init burns two conversions | [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§10.2](#102-the-initialization-sequence-adc168_init) |
-| 27 | §6.5.2.3 Special Read Mode II + Figure 6-7 | `SR = 1`: one RD, 40 clocks, both results on SDOA; the frame layout and its fixed indicator/zero bits; the "RD not longer than one clock cycle" rule | [§2](#2-key-design-decisions), [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§10.3](#103-one-conversion--readout-adc168_read), [§15](#15-number-formats-decoding-a-readout-burst-by-hand) |
+| 26 | §6.5.2.2 Mode II (half-clock mode only) | The readout arrangement this design uses: one read access, one 20-bit frame on SDOA, so a pair's two results take two accesses | [§2](#2-key-design-decisions), [§10.3](#103-one-conversion--readout-adc168_read), [§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming) |
+| 27 | §6.5.2.3 Special Read Mode II + Figure 6-7 | `SR = 1`: one RD, 40 clocks, both results on SDOA — the alternative this design does **not** use; also the frame layout and its fixed indicator/zero bits, which apply either way, and the "RD not longer than one clock cycle" rule | [§2](#2-key-design-decisions), [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§10.3](#103-one-conversion--readout-adc168_read), [§15](#15-number-formats-decoding-a-readout-burst-by-hand) |
 | 31 | §6.5.3 Programming the Reference DAC | The two-step address-then-value write pattern | [§5](#5-what-an-adc-is), [§10.2](#102-the-initialization-sequence-adc168_init) |
 | 32 | §7 Register Map, Table 7-1, Figure 7-1 | "All register updates become active with the CLOCK rising edge after completing the 16-clock-cycle write access" — why `write_word()` sends a third byte | [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§10.1](#101-the-command-word) |
 | 33–35 | Figure 7-2 + Table 7-2, CONFIG register | Every field of the command word, including the A-field action codes | [§10.1](#101-the-command-word), [§10.2](#102-the-initialization-sequence-adc168_init) |

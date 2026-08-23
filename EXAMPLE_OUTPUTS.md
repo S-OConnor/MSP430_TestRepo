@@ -88,7 +88,7 @@ lights the error LED (red, P4.6) before the first tick.
 
 > A real acquisition uses the same vocabulary but moves the other two lines —
 > that is the next section. Press **S1** or **S2** to get there: the firmware
-> rewrites CONFIG to `0x5140` (`SR = 1`, `C = ADC_PAIR`), runs two throw-away
+> rewrites CONFIG to `0x5040` (`SR = 0`, `C = ADC_PAIR`), runs two throw-away
 > conversions to flush the mode-change pipeline, and from the next tick on the
 > trace below repeats every 10 ms. On the LEDs, the green heartbeat doubles
 > from a 0.5 Hz to a 1 Hz blink.
@@ -103,60 +103,69 @@ side, so the capture lands on a whole acquisition every time. Feed CLOCK (J5.7) 
 the **falling** edge (CPOL=0/CPHA=1, MSB first).
 
 ```
-CONVST _|‾|______________________________________________
-CLOCK  ____24 conversion clocks____40 readout clocks_____
-BUSY   ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|______________________________
-RD     _______________________|‾|________________________
-SDOA   -------------------------[ frame A ][ frame B ]---
-SDI    [0x40 0x00 0x00]----------[0x40 0x00 ...]---------
+CONVST _|‾|_________________________________________________
+CLOCK  ____24 conversion____24 readout____24 readout_________
+BUSY   ___|‾‾‾‾‾‾‾‾|_________________________________________
+RD     ____________________|‾|__________|‾|__________________
+SDOA   ---------------------[ frame A ]--[ frame B ]---------
+SDI    [0x40 0x00 0x00]-----[0x40 0x00 ]--[0x40 0x00 ]-------
 ```
+
+Three bursts of three bytes each. With `SR = 0` a read access delivers exactly
+one frame, so converter B needs its own RD pulse — that second strobe is the
+only visible difference from the special-read arrangement.
 
 | Signal | Pin | Behaviour during one tick |
 |---|---|---|
 | **CONVST** | P2.6 → J5.13 | One ~190 ns pulse, while CLOCK is parked low. Rising edge freezes both sample-and-holds. |
 | **BUSY** | P1.5 ← J5.5 | Rises with the conversion, falls after the ~18th CLOCK of the first burst. |
-| **CLOCK** | P2.2 → J5.7 | Two gated bursts: 24 cycles to convert, then 40 to read out. Idle low in the gap, which is where RD moves. |
-| **RD** | P4.2 → J5.11 | One pulse between the bursts; the **falling** edge starts frame A on SDOA. |
-| **SDOA** | P1.7 ← J5.1 | Silent until RD falls, then 40 bits: frame A (CHA1) then frame B (CHB1). |
-| **SDI** | P1.6 → J5.15 | `0x40 0x00` — the constant channel command (`C = 01`, `R = 00` "update C only"). Latched during the readout's first 16 clocks. |
+| **CLOCK** | P2.2 → J5.7 | Three gated bursts of 24 cycles: one to convert, then one per read access. Idle low in the gaps, which is where the strobes move. |
+| **RD** | P4.2 → J5.11 | **Two** pulses, one before each readout burst; each falling edge starts one frame on SDOA. |
+| **SDOA** | P1.7 ← J5.1 | Silent until the first RD falls, then 20 bits of frame A (CHA1); silent again, then 20 bits of frame B (CHB1). The 4 trailing clocks of each burst are padding. |
+| **SDI** | P1.6 → J5.15 | `0x40 0x00` — the constant channel command (`C = 01`, `R = 00` "update C only"). Latched during the first 16 clocks of *each* read access; re-asserting the same pair twice is harmless. |
 
-At `ADC_SCLK_DIV = 16` a clock cycle is 2 µs (0.5 MHz), so the two bursts are
-48 µs and 80 µs; the gaps between them are CPU overhead, not specified delays.
-The whole burst is ~135 µs out of a 10.00 ms tick.
+At `ADC_SCLK_DIV = 16` a clock cycle is 2 µs (0.5 MHz), so each of the three
+bursts is 48 µs; the gaps between them are CPU overhead, not specified delays.
+The whole acquisition is ~150 µs out of a 10.00 ms tick.
 
 ### Turning the readout into numbers
 
-The 40 readout clocks are two 20-bit frames back to back:
+Each read access carries one 20-bit frame, and both have the same shape — which
+is the point of plain Mode II. Over the 24 clocks of a burst:
 
 ```
-   bit  39 38 | 37 ......... 22 | 21 20 | 19 18 | 17 .......... 2 | 1 0
-        0  0  |  result A       | 0  0  | 0  1  |  result B       | 0 0
-        ^  ^                             ^  ^
-        |  +-- converter A indicator (0) |  +-- converter B indicator (1)
-        +-- constant leading zero        +-- constant leading zero
+   bit  23 22 | 21 .......... 6 | 5 4 | 3 2 1 0
+        0  I  |  result         | 0 0 | padding
+        ^  ^
+        |  +-- converter indicator: 0 in frame A, 1 in frame B
+        +-- constant leading zero
 ```
 
-Worked example — CHA1 at ≈ 1.26 V and CHB1 at ≈ 2.57 V come off the decoder as
-these five bytes:
+Worked example — CHA1 at ≈ 1.26 V and CHB1 at ≈ 2.57 V come off the two read
+accesses as these two groups of three bytes:
 
 ```
-   b0   b1   b2   b3   b4
-  0x30 0x25 0x84 0x0E 0x10
-  00110000 00100101 10000100 00001110 00010000
+   frame A            frame B
+   b0   b1   b2       b0   b1   b2
+  0x30 0x25 0x80     0x40 0xE1 0x00
+  00110000 00100101 10000000     01000000 11100001 00000000
 ```
 
 ```
-   CHA1 = ((0x30 & 0x3F) << 10) | (0x25 << 2) | (0x84 >> 6) = 0xC096 = -16234
-   CHB1 = ((0x84 & 0x03) << 14) | (0x0E << 6) | (0x10 >> 2) = 0x0384 =    900
+   CHA1 = ((0x30 & 0x3F) << 10) | (0x25 << 2) | (0x80 >> 6) = 0xC096 = -16234
+   CHB1 = ((0x40 & 0x3F) << 10) | (0xE1 << 2) | (0x00 >> 6) = 0x0384 =    900
 ```
 
 Both are signed 16-bit two's complement: voltage ≈ 2.5 V + code × 76.3 µV, so
 −16234 ≈ 1.261 V and 900 ≈ 2.569 V. (0 V ≈ −32768, 2.5 V ≈ 0, 5 V ≈ +32767.)
 
-Check the six constant bits before trusting any of it — `b0 & 0xC0 == 0x00`,
-`b2 & 0x3C == 0x04`, `b4 & 0x03 == 0x00`. Here that is `0x00`, `0x04`, `0x00`:
-aligned. The firmware runs the same check on every frame and latches the error
-LED when it fails.
+Check the constant bits before trusting any of it. In **both** frames
+`b0 & 0x80 == 0x00` (leading zero) and `b2 & 0x30 == 0x00` (trailing zeros);
+the indicator must be `b0 & 0x40 == 0x00` in frame A and `0x40` in frame B.
+Here: `0x00`/`0x00` and `0x40`/`0x00` — aligned, and in the right order. That
+indicator test is what makes "A first, then B" a checked fact rather than an
+assumption: a swapped or repeated frame fails it. The firmware runs the same
+check on every frame and latches the error LED when it fails.
 
 ## Failure signatures
 
