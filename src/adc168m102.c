@@ -179,8 +179,8 @@ static uint16_t s_link_readback;    /* raw CONFIG readback, published as g_cfg *
  * ~CS rising edge to SDOA tri-stating, which is far shorter than the single
  * instruction between the edges here.
  */
-static void adc_access(const uint8_t *tx, uint8_t *rx,
-                       volatile uint8_t *port, uint8_t mask)
+ALWAYS_INLINE void adc_access(const uint8_t *tx, uint8_t *rx,
+                              volatile uint8_t *port, uint8_t mask)
 {
     spi_wait_ready();
     ADC_CS_LOW();
@@ -193,7 +193,7 @@ static void adc_access(const uint8_t *tx, uint8_t *rx,
 
 /* The RD-opened flavour: register writes, register reads and conversion
  * readouts all go through here. */
-static void rd_access(const uint8_t *tx, uint8_t *rx)
+ALWAYS_INLINE void rd_access(const uint8_t *tx, uint8_t *rx)
 {
     adc_access(tx, rx, ADC_RD_PORT, ADC_RD_BIT);
 }
@@ -211,6 +211,12 @@ static void rd_access(const uint8_t *tx, uint8_t *rx)
  * append 8 extra clocks to deliver it immediately. All three bytes go out in
  * one burst so those 24 clocks are contiguous — the activation edge has to be
  * part of the same access, not a separate burst after a gap.
+ *
+ * Deliberately NOT ALWAYS_INLINE, unlike the other wrappers here: it has eight
+ * call sites in adc168_init() alone, and inlining it (with adc_access folded
+ * in) there costs several hundred bytes of FRAM. It buys no stack back either
+ * — a register write is main -> write_word -> spi_burst_strobe, three levels
+ * shallower than the readout chain that sets the high-water mark.
  */
 static void write_word(uint16_t w)
 {
@@ -238,7 +244,7 @@ static void write_word(uint16_t w)
  * first byte — callers pass the channel command there, or 0x00 when there is
  * nothing to say.
  */
-static void read_access(uint8_t cmd, uint8_t *b)
+ALWAYS_INLINE void read_access(uint8_t cmd, uint8_t *b)
 {
     const uint8_t tx[3] = { cmd, 0x00u, 0x00u };
 
@@ -247,7 +253,7 @@ static void read_access(uint8_t cmd, uint8_t *b)
 
 /* The 16 payload bits of a read access, with the leading zero, the A/B
  * indicator and the trailing zeros stripped off. */
-static uint16_t frame_data(const uint8_t *b)
+ALWAYS_INLINE uint16_t frame_data(const uint8_t *b)
 {
     return (uint16_t)(((uint16_t)(b[0] & 0x3Fu) << 10) |    /* d15..d10 */
                       ((uint16_t)b[1] << 2) |               /* d9..d2   */
@@ -261,7 +267,7 @@ static uint16_t frame_data(const uint8_t *b)
  * during the NEXT access. The two leading bits are indicator bits rather than
  * data, and frame_data() already drops them.
  */
-static uint16_t read_word(void)
+ALWAYS_INLINE uint16_t read_word(void)
 {
     uint8_t b[3];
 

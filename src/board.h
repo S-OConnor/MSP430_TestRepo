@@ -212,4 +212,35 @@
 #define BTN_S2_DOWN()       ((P1IN & BIT1) == 0u)
 #define BTN_ANY_DOWN()      (BTN_S1_DOWN() || BTN_S2_DOWN())
 
+/* ---- inlining ------------------------------------------------------------
+ * Force a helper to be inlined even at -Os, where gcc happily leaves a small
+ * static as a real call.
+ *
+ * Used on the pass-through wrappers that exist only to name a step of one ADC
+ * access. Left out of line, each costs its own frame plus a 2-byte return
+ * address for the whole time the levels below it run:
+ *   main -> adc168_read -> read_access -> adc_access -> spi_burst_strobe
+ *        -> burst_pump
+ * Collapsing the wrappers takes the peak chain from 76 to 56 bytes for about
+ * 80 bytes of duplicated code in FRAM, which is the plentiful resource here
+ * (64 KB FRAM vs 2 KB SRAM).
+ *
+ * Keep the scope modest, though. 2 KB of SRAM against a 76-byte high-water
+ * mark was never tight — this buys headroom, it does not fix a problem — so it
+ * is not worth distorting the design to push the number lower. Two limits came
+ * out of measuring it:
+ *
+ *   - Inlining ACROSS modules means moving a definition into a header, which
+ *     costs that header its independence. spi_wait_ready() stays in spi.c for
+ *     that reason: 4 bytes were not worth spi.h pulling in board.h.
+ *   - always_inline overrides the compiler permanently, and the cost scales
+ *     with call sites, silently. write_word() has eight in adc168_init()
+ *     alone; marking it grew the image by 651 bytes and saved no stack at all.
+ *     Re-measure with -fstack-usage before adding this to anything new.
+ *
+ * The one place it is about timing rather than stack is the SCLK edge poll in
+ * spi.c, where a call/ret pair would sit between the edge and the strobe
+ * release. */
+#define ALWAYS_INLINE       static inline __attribute__((always_inline))
+
 #endif /* BOARD_H */

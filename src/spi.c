@@ -104,7 +104,12 @@ void spi_wait_ready(void)
      * UCTXIFG is then what guarantees the write in spi_burst() will not
      * block, so the caller's strobe is followed by the first clock edge
      * after a fixed handful of instructions rather than after an
-     * unpredictable wait. */
+     * unpredictable wait.
+     *
+     * Left as a real call on purpose. Inlining it into adc_access() is worth
+     * 4 bytes of peak stack and costs spi.h its independence from board.h —
+     * and it does NOT tighten the strobe timing, which is set by the call
+     * into spi_burst_strobe() below, not by this one. */
     while (UCB0STATW & UCBUSY) {
     }
     while (!(UCB0IFG & UCTXIFG)) {
@@ -117,8 +122,13 @@ void spi_wait_ready(void)
  * caller already pushed into the transmit buffer (0 for a plain burst, 1 for
  * a strobed one, which has to start the clock before it can time the strobe
  * against it).
+ *
+ * Inlined into both: it is the bottom of the per-tick call chain, so its
+ * frame would be held for the whole 48 us of a burst, and it is only pulled
+ * out of the two entry points to keep them from repeating each other.
  */
-static void burst_pump(const uint8_t *tx, uint8_t *rx, uint8_t n, uint8_t sent)
+ALWAYS_INLINE void burst_pump(const uint8_t *tx, uint8_t *rx, uint8_t n,
+                              uint8_t sent)
 {
     uint8_t got = 0u;
 
@@ -182,11 +192,9 @@ timer/PWM channel instead of from the CPU."
 
 #define SCLK_EDGE_GUARD     2000u
 
-/* always_inline: at -Os gcc would otherwise leave these as calls, and the
- * call/ret pair sits between the edge and the strobe release. */
-#define EDGE_INLINE  static inline __attribute__((always_inline))
-
-EDGE_INLINE void wait_sclk_high(void)
+/* ALWAYS_INLINE (board.h): at -Os gcc would otherwise leave these as calls,
+ * and the call/ret pair sits between the edge and the strobe release. */
+ALWAYS_INLINE void wait_sclk_high(void)
 {
     uint16_t guard = SCLK_EDGE_GUARD;
 
@@ -194,7 +202,7 @@ EDGE_INLINE void wait_sclk_high(void)
     }
 }
 
-EDGE_INLINE void wait_sclk_low(void)
+ALWAYS_INLINE void wait_sclk_low(void)
 {
     uint16_t guard = SCLK_EDGE_GUARD;
 
