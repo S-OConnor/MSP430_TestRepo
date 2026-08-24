@@ -9,8 +9,9 @@
  *  one divided rate; those two numbers are the only timings in the design:
  *    MCLK  (CPU)        = DCO 16 MHz          (needs 1 FRAM wait state)
  *    SMCLK (peripherals)= DCO 16 MHz          (undivided; SPI bit clock /32
- *                                              -> 0.5 MHz, and the tick timer
- *                                              via /8)
+ *                                              -> 0.5 MHz, the tick timer
+ *                                              via /8, and the UART baud
+ *                                              generator -> 115200)
  *    ACLK               = VLO ~9.4 kHz        (parked; nothing is timed
  *                                              from it)
  *
@@ -57,14 +58,18 @@ static void gpio_init(void)
      * When a peripheral function is selected, the peripheral controls the
      * pin direction automatically (PxDIR is ignored for that pin).
      *
-     * Only eUSCI_B0 is muxed out. P2.0/P2.1 reach the eZ-FET backchannel
-     * UART on the LaunchPad, but nothing drives them any more, so they stay
-     * plain outputs at 0 like every other unused pin. */
+     * Two modules are muxed out: eUSCI_B0 for the ADC bus, and eUSCI_A0 on
+     * P2.0/P2.1, which reach the LaunchPad's eZ-FET debug chip and come out
+     * of it as a USB CDC serial port on the host. RXD is muxed even though
+     * this firmware only transmits — leaving the pin as a driven output
+     * would fight the eZ-FET whenever the host's terminal sent a keystroke. */
     P1SEL1 |= BIT6 | BIT7;                      /* P1.6 = UCB0SIMO (-> SDI)
                                                  * P1.7 = UCB0SOMI (<- SDOA)  */
     P1SEL0 &= (uint8_t)~(BIT6 | BIT7);          /* make sure SEL0 bits are 0  */
-    P2SEL1 |= BIT2;                             /* P2.2 = UCB0CLK (-> CLOCK)  */
-    P2SEL0 &= (uint8_t)~BIT2;
+    P2SEL1 |= BIT0 | BIT1 | BIT2;               /* P2.0 = UCA0TXD (-> host)
+                                                 * P2.1 = UCA0RXD (<- host)
+                                                 * P2.2 = UCB0CLK (-> CLOCK)  */
+    P2SEL0 &= (uint8_t)~(BIT0 | BIT1 | BIT2);
 
     /* ADC chip select: keep ~CS deasserted (high) until adc168_init() is
      * ready to talk. All other strobe outputs (CONVST P2.6, RD P4.2) idle at

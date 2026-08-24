@@ -10,6 +10,7 @@ add_executable(fw.elf
     src/main.c
     src/clocks.c
     src/spi.c
+    src/uart.c
     src/adc168m102.c
 )
 

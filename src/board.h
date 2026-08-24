@@ -29,18 +29,25 @@
  *                                                       held over CLOCK 1)
  *    P1.5        (GPIO)          in     <-  5           BUSY   (high while a
  *                                                       conversion runs)
+ *    P2.0        UCA0TXD         out    ->  (on-board)  backchannel UART TX
+ *    P2.1        UCA0RXD         in     <-  (on-board)  backchannel UART RX
+ *                                                       (unused; muxed only
+ *                                                       so the pin stops
+ *                                                       driving the eZ-FET)
  *    strap                                  17 -> GND   M0 = 0 (with M1 pulled
  *                                                       high on the EVM this
  *                                                       selects "Mode II":
  *                                                       manual channel select,
  *                                                       data on SDOA only)
  *
- *  MCU clock tree (set up in clocks.c). There are exactly two timings in this
- *  design - a 16 MHz system clock and a 0.5 MHz ADC bus clock:
+ *  MCU clock tree (set up in clocks.c). Everything divides down from one
+ *  16 MHz system clock - the ADC bus runs at 0.5 MHz, the serial link at
+ *  115200 baud:
  *    MCLK  = 16 MHz  (DCO)         - CPU clock, running continuously
  *    SMCLK = 16 MHz  (DCO, /1)     - feeds the eUSCI SPI bit clock (/32 =
- *                                    0.5 MHz) AND the 100 Hz sample-tick
- *                                    timer (via /8 = 2 MHz)
+ *                                    0.5 MHz), the 100 Hz sample-tick timer
+ *                                    (via /8 = 2 MHz), AND the UART baud
+ *                                    generator (115200, oversampling mode)
  *    ACLK  = ~9.4 kHz (VLO)        - parked on the internal very-low-frequency
  *                                    oscillator; nothing is timed from it.
  *                                    No crystal is used: LFXT and HFXT are
@@ -62,7 +69,7 @@
 
 /* eUSCI_B0 bit-clock divider: SPI SCLK = SMCLK / ADC_SCLK_DIV.
  * 32 -> 16 MHz / 32 = 0.5 MHz, the bottom of the ADC's 0.5..20 MHz half-clock
- * window and the second of this design's two timings. The slow clock buys
+ * window. The slow clock buys
  * setup/hold margin on the jumper wires to the EVM, and it is what makes the
  * CPU-timed strobe release below possible, at the cost of a longer bus burst
  * per tick (~150 us, still ~1.5 % of the 10 ms tick).

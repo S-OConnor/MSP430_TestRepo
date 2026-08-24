@@ -184,7 +184,7 @@ ALWAYS_INLINE void adc_access(const uint8_t *tx, uint8_t *rx)
     spi_wait_ready();
     ADC_CS_LOW();
 
-    spi_burst_strobe(tx, rx, 3u, ADC_CONST_PORT, ADC_CONST_BIT, ADC_RD_PORT, ADC_RD_BIT);
+    spi_burst_strobe(tx, rx, 3u, ADC_CONVST_PORT, ADC_CONVST_BIT, ADC_RD_PORT, ADC_RD_BIT);
 
     spi_wait_ready();
     ADC_CS_HIGH();

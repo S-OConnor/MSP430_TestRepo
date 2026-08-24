@@ -1,8 +1,11 @@
 # Example outputs
 
-What a healthy board actually produces on the wire. With no UART in the
-firmware, the ADC bus *is* the output: everything below is what you should see
-on a scope or logic analyzer.
+What a healthy board actually produces **on the wire** — everything below is
+what you should see on a scope or logic analyzer hooked to the ADC bus. This is
+the view the firmware's serial output cannot give you: the frames as they are
+shifted, against the clock and strobes that produced them. For the CSV records
+the same activity produces on the backchannel UART, see
+[README §Reading the results](README.md#reading-the-results).
 
 The board powers up in the **idle phase** — the register exchange below,
 repeated once a second, and nothing else — and starts converting only when S1

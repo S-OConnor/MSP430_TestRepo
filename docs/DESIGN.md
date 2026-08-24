@@ -65,7 +65,7 @@ Contents:
 
 **Part IV — Observing and diagnosing**
 
-14. [Getting at the data: the scope](#14-getting-at-the-data-the-scope)
+14. [Getting at the data: the scope and the serial line](#14-getting-at-the-data-the-scope-and-the-serial-line)
 15. [Number formats: decoding a readout burst by hand](#15-number-formats-decoding-a-readout-burst-by-hand)
 16. [What can go wrong and how the firmware reacts](#16-what-can-go-wrong-and-how-the-firmware-reacts)
 17. [Glossary](#17-glossary)
@@ -154,10 +154,10 @@ flowchart LR
 | Strobe/clock alignment | Every access is one contiguous train of clocks, and the strobe that opens it **straddles that train's first clock**: `spi_burst_strobe()` raises CONVST/RD a few hundred ns before the first rising CLOCK edge and releases it on the **second** rising edge of the same burst | The ADC samples RD and CONVST *at* the first rising CLOCK edge of the access they open and wants them back low about one clock later *(ADC §5.6 t1/t2/t3, p. 9; Figure 5-1, p. 10; §6.5.2.2, p. 26)* — a narrow pulse that has already fallen before the burst begins is one the part never sees at that edge. The release is timed by watching the SCLK pin itself through `P2IN`, not by counting cycles, so it needs no assumption about the eUSCI's start-up delay; the window runs with interrupts masked so the tick ISR cannot make it miss an edge. The burst stays unbroken because `UCB0TXBUF` is reloaded on `UCTXIFG`, while the previous byte is still shifting. Full mechanism, numbers and the one spec deviation: [§8.1](#81-placing-a-strobe-on-the-clock). |
 | Input mux | Pseudo-differential **4:1** configuration (`PDE=1`, ADC Table 6-2, p. 17), channel picked by CONFIG `C[1:0]` | Gives four single-ended inputs per converter measured against a common mode, which is what this application wants. `M0 = 0` keeps selection *manual* through `C[1:0]`; the SEQFIFO sequencer applies only to automatic mode (`M0 = 1`) *(ADC §6.3.2.1, p. 21)* and is left at its reset default. |
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
-| Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
+| Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope-and-the-serial-line)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
 | Button input | S1 (P4.5) and S2 (P1.1), internal pull-ups, **polled** once per tick with a 2-poll (20 ms) debounce — no port interrupt | The CPU already wakes every 10 ms, so the poll is free and the tick spacing *is* the debounce: no second timer, no ISR firing a dozen times inside one contact bounce. Both buttons do the same thing, so the firmware never has to tell them apart. The LaunchPad wires each switch straight to GND with no external pull-up *(LP schematic, p. 37)*, hence `PxREN` + `PxOUT = 1` and active-low sensing. |
 | Sample timebase | **No crystal.** Timer_A0 from SMCLK/8 = 2 MHz, period 20000 → exactly 100.000 Hz, all of it derived from the internal DCO | The tick's only job is to space the ADC bursts evenly; nothing measures absolute time from it, so the DCO's ~±2 % is ample and a crystal buys nothing the application can use. Dropping it removes the oscillator-fault handshake, the ~1 s crystal start-up window at every boot, and a whole failure mode — LFXT and HFXT are simply held off, PJ.4/PJ.5 stay plain GPIO, and 2 MHz ÷ 20000 lands on 100.000 Hz exactly, which 32768 Hz never could ([§12](#12-timing-the-100-hz-tick)). |
-| Readout | None from the MCU — the ADC bus itself is the measurement point | The scope has to be on the bus during bring-up anyway, and SDOA already carries both results in full 16-bit resolution. Dropping the UART removes a peripheral, an ISR, a 256-byte buffer and a whole class of "did the host keep up?" failure from the tick path. |
+| Readout | **Two paths.** The ADC bus is the primary measurement point; eUSCI_A0 on the LaunchPad's eZ-FET backchannel (115200-8-N-1) carries one tagged CSV record per tick on top of it | The scope has to be on the bus during bring-up anyway, and SDOA carries both results in full 16-bit resolution — but a scope cannot log an hour of samples, and reading them back one halt at a time from `mspdebug` does not scale. The serial line makes every tick a line of text on the host with no extra hardware, since the backchannel is already there on P2.0/P2.1. It is kept strictly off the critical path: `uart_write()` copies into a 256-byte ring and returns, the eUSCI TX interrupt drains it during the ~98 % of the tick spent spinning, and a host that stalls costs a dropped line counted in `<errs>` rather than a late sample. The two record types are tagged `C` (idle CONFIG probe) and `D` (sample) so one stream carries both phases ([§14](#14-getting-at-the-data-the-scope-and-the-serial-line)). |
 | Status reporting | Two LEDs, plus every computed value held in a `volatile` global for the debugger | Enough to tell "alive and ticking" from "something is wrong" at a glance — and, because the heartbeat rate doubles at the phase change, which phase the board is in; `mspdebug` supplies the detail when the LED says to look. |
 | Integrity | Every ADC frame carries fixed indicator/zero bits which are checked on every read *(ADC Figure 6-7, p. 27)* | Cheap, continuous self-test of wiring and clock phase; failures are counted in the `errs` column and light the error LED. |
 | Toolchain | TI msp430-gcc via CMake cross file; Docker/Podman dev image | Reproducible builds on any host; no IDE dependency. |
@@ -171,27 +171,33 @@ src/
 ├── clocks.c/.h    GPIO setup, I/O latch release, FRAM wait state, DCO clocks
 ├── spi.c/.h       eUSCI_B0 SPI master: contiguous bursts, and the
 │                 CONVST/RD strobe placed against their clock edges
+├── uart.c/.h      eUSCI_A0 backchannel UART, 115200-8-N-1: ring buffer +
+│                 interrupt-driven transmit, never blocks the tick
 ├── adc168m102.c/.h ADC driver: init sequence, conversion + readout
 └── main.c         phase state machine, tick timer, button poll,
-                   sample loop, LEDs, observable globals
+                   sample loop, record formatting, LEDs,
+                   observable globals
 ```
 
 Layering (arrows = "uses"):
 
 ```mermaid
 flowchart TD
-    main["main.c<br/>phase state machine, tick timer,<br/>button poll, sample loop,<br/>LEDs, observable globals"]
+    main["main.c<br/>phase state machine, tick timer,<br/>button poll, sample loop,<br/>record formatting,<br/>LEDs, observable globals"]
     clocks["clocks.c/.h<br/>GPIO, I/O latch release,<br/>FRAM wait state, DCO clocks"]
     adc["adc168m102.c/.h<br/>init sequence,<br/>conversion + readout"]
     spi["spi.c/.h<br/>eUSCI_B0 SPI master:<br/>contiguous bursts + strobe<br/>placement on clock edges"]
+    uart["uart.c/.h<br/>eUSCI_A0 UART 115200:<br/>TX ring buffer +<br/>interrupt-driven transmit"]
     board["board.h<br/>pin map + tunables<br/>+ msp430.h device header"]
 
     main --> clocks
     main --> adc
+    main --> uart
     adc --> spi
     clocks --> board
     adc --> board
     spi --> board
+    uart --> board
     main --> board
 ```
 
@@ -579,11 +585,12 @@ which is the arrangement this design has just moved away from.
 
 A 16-bit microcontroller with 64 KB of FRAM (non-volatile memory that is
 also writable like RAM), 2 KB SRAM, and a set of on-chip peripherals. The
-ones we use: **eUSCI_B0** (configured as SPI), **Timer_A0** (for the 100 Hz
-tick), and the **clock system** that generates the CPU and peripheral
-clocks. That is deliberately the whole list — there is no serial peripheral
-in this firmware. *(MCU device comparison, p. 5: eUSCI_B0 supports I²C and
-SPI; TA0 is the 3-CCR Timer_A instance.)*
+ones we use: **eUSCI_B0** (configured as SPI, for the ADC bus), **eUSCI_A0**
+(configured as a UART, for the backchannel serial link), **Timer_A0** (for the
+100 Hz tick), and the **clock system** that generates the CPU and peripheral
+clocks. That is the whole list. *(MCU device comparison, p. 5: eUSCI_B0
+supports I²C and SPI, eUSCI_A0 UART/IrDA/SPI; TA0 is the 3-CCR Timer_A
+instance.)*
 
 ### 9.2 Clock tree
 
@@ -1344,13 +1351,85 @@ the *next* tick, 10 ms later.
 
 # Part IV — Observing and diagnosing
 
-## 14. Getting at the data: the scope
+## 14. Getting at the data: the scope and the serial line
 
-There is no link to a PC. The ADC's results leave the *ADC*, on SDOA, and
-that wire is where you read them — the MSP430 never needs to repeat them.
-This is the deliberate simplification of the design: no serial peripheral,
-no ring buffer, no interrupt-driven transmit, and no way for a slow host to
-perturb the sample timing.
+There are two ways to read this firmware, and they answer different
+questions.
+
+The ADC's results leave the *ADC*, on SDOA, and that wire is where you see
+them **as they are shifted** — bit by bit, against the clock and the strobes
+that produced them. Nothing the MSP430 reports can show you that; it is the
+only place to confirm the framing, the strobe placement and the clock phase
+are right, and it is where bring-up happens.
+
+What the scope cannot do is keep up for an hour. So the MSP430 also *repeats*
+what it read, as one line of CSV per tick on the LaunchPad's eZ-FET
+backchannel UART (115200-8-N-1, P2.0/P2.1, a USB CDC port on the host) — the
+path for logging, plotting and watching a long run drift. The rule that keeps
+it from perturbing the measurement is that the tick path never waits on it:
+`uart_write()` copies the line into a 256-byte ring and returns, the eUSCI TX
+interrupt shifts it out during the ~98 % of the tick the CPU spends spinning,
+and a host that stalls loses a whole line — counted in the record's `<errs>`
+field — rather than delaying a conversion. The records are described in
+[README §Reading the results](../README.md#reading-the-results).
+
+**Capturing the serial stream.** The port is the eZ-FET's second USB CDC
+interface — on Linux usually `/dev/ttyACM1`, with `/dev/ttyACM0` being the
+debug interface `mspdebug` flashes through. The two are independent, so a
+terminal can stay open across a reflash.
+
+The obvious `minicom ... | tee run.csv` does **not** work, and it is worth
+knowing why rather than discovering it: minicom is a full-screen curses
+program, so its stdout is the user interface, not the serial data. Piping it
+sends cursor-positioning escapes to `tee` and leaves minicom drawing to a pipe
+it cannot control. What you want is minicom's own capture, which writes the
+incoming bytes to a file *and* keeps showing them:
+
+```sh
+minicom -D /dev/ttyACM1 -b 115200 -o -C run.csv
+```
+
+- `-D` / `-b` — port and line rate, overriding whatever is in `~/.minirc.dfl`.
+- `-o` — skip the modem initialization string. minicom's ancestry is dial-up;
+  without this it sends `AT`-style setup at the eZ-FET, which answers with
+  nothing and costs you a couple of confusing seconds at start-up.
+- `-C run.csv` — capture from the first byte. `Ctrl-A L` toggles capture on and
+  off mid-session if you would rather start it by hand, and `Ctrl-A X` quits.
+
+Turn **hardware flow control off** (`Ctrl-A O` → *Serial port setup* → `F`,
+then *Save setup as dfl*). minicom defaults it on, and this firmware drives
+neither RTS nor CTS — the J13 jumpers for them may not even be fitted. Data
+still arrives with it on, but nothing you type reaches the board, which is a
+confusing way to find out. Nothing is lost by disabling it: the link is
+one-way and runs at ~2 kB/s against 11.5 kB/s of capacity.
+
+If you do want a real shell pipe — to filter or plot live — skip the terminal
+emulator and read the character device directly, which is where `tee` belongs:
+
+```sh
+stty -F /dev/ttyACM1 115200 raw -echo -crtscts
+cat /dev/ttyACM1 | tee run.csv
+```
+
+`raw` is the part that matters: without it the line discipline processes the
+stream and will, among other things, turn the firmware's CRLF into something
+else. `picocom -b 115200 --logfile run.csv /dev/ttyACM1` is a third option and
+behaves like the minicom one.
+
+Two things to expect in the resulting file. The banner is printed **once, at
+reset**, so open the capture first and then press **S3** (the reset button) —
+otherwise you join a stream already in progress and never see the `status=` and
+`cfg=` line. And every record ends CRLF, because that is what the firmware
+emits; strip the CR when feeding the file to something that cares:
+
+```sh
+grep '^D,' run.csv | tr -d '\r' > samples.csv     # samples only, LF endings
+```
+
+That leaves a plain `n,a,b,errs` CSV. The `errs` column is the one to watch on
+a long run: it should be a flat 0, and any step in it marks the exact sample
+where something went wrong — see
+[§16](#16-what-can-go-wrong-and-how-the-firmware-reacts).
 
 **Where to probe.** Header J5 exists precisely for this: it "provides a way to
 probe the digital communication pins with an oscilloscope or logic analyzer"
@@ -1631,7 +1710,7 @@ designators are its own — so those come from the two user's guides.
 | EVM | 3 | Table 1-1, supply requirements | DVDD 2.3–5.5 V, AVDD 2.7–5.5 V, OPA_V+ 6–10 V on J3[3]/J4[3], OPA_V− −10–0.35 V on J3[1]/J4[1] | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
 | EVM | 4 | §2.1, power circuit | Remove R19 → feed DVDD at TP3; remove R34 → feed AVDD at TP2 | [§9.4](#94-wiring), [§16.2](#162-the-detail-behind-each-leaf) |
 | EVM | 5 | §2.2 + Figure 2-3, analog inputs | J2 = channel A, J1 = channel B; **J2 pin 5 = CHA1, J1 pin 5 = CHB1**; JP1/JP2 default to `CMx_EXT` | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§16.2](#162-the-detail-behind-each-leaf) |
-| EVM | 6 | §2.3 + Figure 2-4, ADC circuit | The whole J5 pinout (SDOA 1, BUSY 5, CLK 7, ~CS 9, RD 11, CONVST 13, SDI 15, M0 17, M1 19); 22 µF on REFIO1/REFIO2; J5 is meant for scope/logic-analyzer probing and an external controller | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§14](#14-getting-at-the-data-the-scope), [§16](#16-what-can-go-wrong-and-how-the-firmware-reacts) |
+| EVM | 6 | §2.3 + Figure 2-4, ADC circuit | The whole J5 pinout (SDOA 1, BUSY 5, CLK 7, ~CS 9, RD 11, CONVST 13, SDI 15, M0 17, M1 19); 22 µF on REFIO1/REFIO2; J5 is meant for scope/logic-analyzer probing and an external controller | [§9.3](#93-pin-map), [§9.4](#94-wiring), [§10.2](#102-the-initialization-sequence-adc168_init), [§14](#14-getting-at-the-data-the-scope-and-the-serial-line), [§16](#16-what-can-go-wrong-and-how-the-firmware-reacts) |
 | LP | 8 | §2.2.2, Clocking | **Y4 is the populated 32 kHz crystal** on PJ.4/PJ.5 (schematic p. 37: 32.768 kHz, 7 pF load); Y1 is an unpopulated 4–24 MHz HF footprint. This design uses **neither** — the timebase is the internal DCO | [§9.2](#92-clock-tree), [§9.3](#93-pin-map), [§12](#12-timing-the-100-hz-tick) |
 | LP | 21 | Figure 15, BoosterPack connector pinout | Which BoosterPack pin each port pin lands on: J4 = pins 1–10 (3V3 1, P4.2 2, P2.6 3, P2.2 7), J5 = pins 11–20 (P1.4 12, P1.5 13, P1.7 14, P1.6 15, GND 20) | [§9.4](#94-wiring) |
-| LP | 37 | Schematic | Left user-interface cluster: **S1 on P4.5, LED1 (red) on P4.6**; right cluster: **S2 on P1.1, LED2 (green) on P1.0** — both switches to GND with no external pull-up; Y4 across PJ.4/PJ.5 | [§2](#2-key-design-decisions), [§9.3](#93-pin-map), [§9.4](#94-wiring), [§14](#14-getting-at-the-data-the-scope), [§16.2](#162-the-detail-behind-each-leaf) |
+| LP | 37 | Schematic | Left user-interface cluster: **S1 on P4.5, LED1 (red) on P4.6**; right cluster: **S2 on P1.1, LED2 (green) on P1.0** — both switches to GND with no external pull-up; Y4 across PJ.4/PJ.5 | [§2](#2-key-design-decisions), [§9.3](#93-pin-map), [§9.4](#94-wiring), [§14](#14-getting-at-the-data-the-scope-and-the-serial-line), [§16.2](#162-the-detail-behind-each-leaf) |

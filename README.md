@@ -23,12 +23,21 @@ off the same 100 Hz tick — `IDLE_CONFIG_TICKS` / `BTN_DEBOUNCE_POLLS` in
 [docs/DESIGN.md §4](docs/DESIGN.md#4-runtime-behaviour) and
 [§10.4](docs/DESIGN.md#104-the-idle-probe-and-the-hand-over-to-streaming).
 
-**There is no serial output.** Results are read straight off the ADC bus with a
-scope or logic analyzer: SDOA carries both 16-bit results, one per read access,
-in the two readout bursts that end every tick. Trigger on the CONVST rising
-edge — it fires once per 10 ms with quiet either side, so a single-shot capture
-lands on a whole acquisition every time. Two LEDs report health, and every value the
-firmware computes stays in a global a debugger can read.
+**Every tick that touches the ADC prints one line** on the LaunchPad's
+backchannel UART — 115200-8-N-1 through the eZ-FET, which appears on the host
+as a USB CDC port (the second `/dev/ttyACM*` on Linux). Two record types, tagged
+by their first character: `C,<n>,<cfg>,<errs>` once a second while idle (the
+CONFIG readback, in hex), `D,<n>,<a>,<b>,<errs>` per tick while streaming (the
+two channel codes, signed decimal). `<errs>` is the running total of every error
+the firmware counts. See [Reading the results](#reading-the-results).
+
+The acquisition is equally visible **on the ADC bus itself**, which is still the
+only place to see the frames as they shift: SDOA carries both 16-bit results,
+one per read access, in the two readout bursts that end every tick. Trigger on
+the CONVST rising edge — it fires once per 10 ms with quiet either side, so a
+single-shot capture lands on a whole acquisition every time. Two LEDs report
+health, and every value the firmware computes stays in a global a debugger can
+read.
 
 Documentation:
 - [docs/DESIGN.md](docs/DESIGN.md) — the full design: overview and key
@@ -89,8 +98,11 @@ least two grounds):
 
 SDOB (J5.3) and M1 (J5.19) stay unconnected.
 
-Nothing else needs wiring — the buttons and LEDs the firmware uses are on the
-LaunchPad itself. The board's two user-interface clusters sit on opposite
+Nothing else needs wiring — the buttons, LEDs and serial port the firmware uses
+are all on the LaunchPad itself. The UART goes out on **P2.0 (UCA0TXD)** and
+back in on **P2.1 (UCA0RXD)**, both of which run to the on-board eZ-FET rather
+than to a header; RXD is muxed to the peripheral only so the pin stops driving
+against the debug chip, as the firmware never reads it. The board's two user-interface clusters sit on opposite
 ports (SLAU535B schematic, p. 37):
 
 | LaunchPad control | Pin | Used for |
@@ -180,6 +192,47 @@ cmake --build build --target flash-ezfet   # fallback: built-in eZ-FET driver
 ```
 
 ### Reading the results
+
+#### Over serial
+
+The eZ-FET presents the backchannel UART as a second CDC port — on Linux
+typically `/dev/ttyACM1` (`/dev/ttyACM0` is the debug interface). Any terminal
+at **115200-8-N-1** works:
+
+```sh
+picocom -b 115200 /dev/ttyACM1        # or: screen /dev/ttyACM1 115200
+```
+
+Reset the board and it opens with a banner, probes CONFIG once a second, then
+streams samples once a button is pressed:
+
+```
+# adc168m102 fw  status=0000 cfg=1041
+# C,n,cfg,errs    idle: n-th CONFIG probe, cfg hex
+# D,n,a,b,errs    stream: n-th sample, -32768 = bad read
+# press S1 or S2 to start streaming
+C,1,1041,0
+C,2,1041,0
+# streaming
+D,1,-12345,678,0
+D,2,-12344,677,0
+```
+
+Lines starting `#` are comments; the rest is CSV whose first field says which
+record it is. `<errs>` counts bad frames, BUSY timeouts, failed CONFIG
+readbacks **and** lines the UART had to drop, so a capture that stays at 0 is
+one where nothing was missed — and a jump in it marks exactly which sample went
+wrong. `-32768` in place of a channel code means that conversion failed; it is
+also the code for a genuine 0 V input, which is why the error field is there to
+tell them apart.
+
+To log to a file: `picocom -b 115200 --logfile run.csv /dev/ttyACM1`, or with
+minicom's own capture, `minicom -D /dev/ttyACM1 -b 115200 -o -C run.csv`.
+[docs/DESIGN.md §14](docs/DESIGN.md#14-getting-at-the-data-the-scope-and-the-serial-line)
+covers both, why `minicom | tee` is not one of the options, and how to get a
+plain LF-terminated CSV out of the capture.
+
+#### On the bus
 
 Put the scope on **SDOA** (EVM J5.1) with **CONVST** (J5.13) as the trigger,
 rising edge, single shot. Each tick produces one burst:
