@@ -179,23 +179,15 @@ static uint16_t s_link_readback;    /* raw CONFIG readback, published as g_cfg *
  * ~CS rising edge to SDOA tri-stating, which is far shorter than the single
  * instruction between the edges here.
  */
-ALWAYS_INLINE void adc_access(const uint8_t *tx, uint8_t *rx,
-                              volatile uint8_t *port, uint8_t mask)
+ALWAYS_INLINE void adc_access(const uint8_t *tx, uint8_t *rx)
 {
     spi_wait_ready();
     ADC_CS_LOW();
 
-    spi_burst_strobe(tx, rx, 3u, port, mask);
+    spi_burst_strobe(tx, rx, 3u, ADC_CONST_PORT, ADC_CONST_BIT, ADC_RD_PORT, ADC_RD_BIT);
 
     spi_wait_ready();
     ADC_CS_HIGH();
-}
-
-/* The RD-opened flavour: register writes, register reads and conversion
- * readouts all go through here. */
-ALWAYS_INLINE void rd_access(const uint8_t *tx, uint8_t *rx)
-{
-    adc_access(tx, rx, ADC_RD_PORT, ADC_RD_BIT);
 }
 
 /*
@@ -224,7 +216,7 @@ static void write_word(uint16_t w)
                             (uint8_t)w,             /* bits  7..0 */
                             0x00u };                /* activation clocks */
 
-    rd_access(tx, NULL);
+    adc_access(tx, NULL);
 }
 
 /*
@@ -248,7 +240,7 @@ ALWAYS_INLINE void read_access(uint8_t cmd, uint8_t *b)
 {
     const uint8_t tx[3] = { cmd, 0x00u, 0x00u };
 
-    rd_access(tx, b);
+    adc_access(tx, b);
 }
 
 /* The 16 payload bits of a read access, with the leading zero, the A/B
@@ -466,7 +458,7 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
      * ignores SDI — but we put the command byte in the first slot anyway: if
      * the part latched it unexpectedly it would command the SAME pair
      * (harmless). */
-    adc_access(conv_tx, NULL, ADC_CONVST_PORT, ADC_CONVST_BIT);
+    adc_access(conv_tx, NULL);
 
     /* BUSY should already have fallen during the burst: the conversion ends
      * after the ~18th clock (36 us at 0.5 MHz) and the burst runs 24 clocks

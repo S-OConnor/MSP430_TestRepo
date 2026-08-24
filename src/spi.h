@@ -41,7 +41,8 @@ void spi_wait_ready(void);
  * Everything else — contiguous clocks, full duplex, rx = NULL to discard — is
  * exactly spi_burst(). n must be >= 1. */
 void spi_burst_strobe(const uint8_t *tx, uint8_t *rx, uint8_t n,
-                      volatile uint8_t *port, uint8_t mask);
+                      volatile uint8_t *port_a, uint8_t mask_a,
+                       volatile uint8_t *port_b, uint8_t mask_b);
 
 /* Exchange n bytes as ONE contiguous train of clocks — no stall at the byte
  * boundaries, which a byte-at-a-time loop cannot avoid (see spi.c for why).

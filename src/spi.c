@@ -211,15 +211,20 @@ ALWAYS_INLINE void wait_sclk_low(void)
 }
 
 void spi_burst_strobe(const uint8_t *tx, uint8_t *rx, uint8_t n,
-                      volatile uint8_t *port, uint8_t mask)
+                      volatile uint8_t *port_a, uint8_t mask_a,
+                       volatile uint8_t *port_b, uint8_t mask_b)
 {
     /* Everything is resolved into registers up front — the strobe's address,
      * both masks, the first byte — so that the assert, the clock start and
      * the release are single instructions with nothing to fetch. The whole
      * high time is charged against t2/t3 (max 1 t_CLK), and every cycle
      * before the first clock edge comes out of that budget. */
-    volatile uint8_t *const strobe = port;
-    const uint8_t keep = (uint8_t)~mask;
+    volatile uint8_t *const strobe_a = port_a;
+    volatile uint8_t *const strobe_b = port_b;
+    const uint8_t set_a = mask_a;
+    const uint8_t set_b = mask_b;
+    const uint8_t keep_a = (uint8_t)~mask_a;
+    const uint8_t keep_b = (uint8_t)~mask_b;
     const uint8_t first = tx[0];
 
     /* From here to the release the timing is measured by watching SCLK edges
@@ -240,7 +245,8 @@ void spi_burst_strobe(const uint8_t *tx, uint8_t *rx, uint8_t n,
      * clock-locked. The caller must already have run spi_wait_ready(), so
      * UCB0TXBUF is free, SCLK is parked at idle low, and this write is what
      * sets it running. */
-    *strobe |= mask;
+    *strobe_a |= set_a;
+    *strobe_b |= set_b;
     UCB0TXBUF = first;
 
     /* Follow the clock the eUSCI is now generating:
@@ -253,13 +259,13 @@ void spi_burst_strobe(const uint8_t *tx, uint8_t *rx, uint8_t n,
      * empties and the burst stays one contiguous train of clocks. */
     wait_sclk_high();
     wait_sclk_low();
-    wait_sclk_high();
 
     /* One AND.B — the strobe falls within a few hundred ns of the second
      * rising edge, inside that clock's high phase. Total high time is
      * therefore a bit over one CLOCK period: the shape the datasheet draws
      * and the shape the PHI reference board produces. */
-    *strobe &= keep;
+    *strobe_a &= keep_a;
+    *strobe_b &= keep_b;
 
     __set_interrupt_state(irq_state);
 
