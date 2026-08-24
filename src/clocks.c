@@ -5,20 +5,38 @@
  * =============================================================================
  *  GPIO + clock-system bring-up for the MSP430FR5969
  * =============================================================================
- *  Target clock tree:
+ *  Target clock tree - the whole system runs at ONE rate, and the ADC bus at
+ *  one divided rate; those two numbers are the only timings in the design:
  *    MCLK  (CPU)        = DCO 16 MHz          (needs 1 FRAM wait state)
- *    SMCLK (peripherals)= DCO / 2 = 8 MHz     (SPI bit clock)
- *    ACLK  (timer)      = LFXT crystal 32768 Hz (LaunchPad crystal Y4 on
- *                         PJ.4/PJ.5)
+ *    SMCLK (peripherals)= DCO 16 MHz          (undivided; SPI bit clock /32
+ *                                              -> 0.5 MHz, and the tick timer
+ *                                              via /8)
+ *    ACLK               = VLO ~9.4 kHz        (parked; nothing is timed
+ *                                              from it)
+ *
+ *  The CPU is never stopped. It runs flat out at 16 MHz from reset onward and
+ *  busy-waits between ticks; no sleep or low-power state is entered anywhere
+ *  in this firmware.
+ *
+ *  NO CRYSTAL IS USED. Both crystal oscillators are held off (LFXTOFF,
+ *  HFXTOFF), so PJ.4/PJ.5 stay plain GPIO, the LaunchPad's Y4 sits idle, and
+ *  the whole clock tree comes from the on-chip DCO/VLO. Everything the
+ *  firmware times - the 100 Hz sample tick, the SPI bursts, the millisecond
+ *  delays - therefore runs at DCO accuracy (roughly +-2 %), which is all any
+ *  of it needs: the tick only has to space the ADC bursts evenly.
+ *
+ *  Dropping the crystal also removes the ~1 s start-up window bring-up used
+ *  to spend waiting for a watch crystal to reach amplitude, so boot is now
+ *  immediate and clock_init() can no longer fail.
  * =============================================================================
  */
 
 static void gpio_init(void)
 {
     /* Drive every pin as an output at logic 0 first. Unconfigured CMOS inputs
-     * float and burn current / pick up noise; TI's low-power app notes
-     * recommend "all unused pins output low" as the safe baseline. The real
-     * pin functions are then layered on top of this default.
+     * float, which lets them oscillate and pick up noise; TI's application
+     * notes recommend "all unused pins output low" as the safe baseline. The
+     * real pin functions are then layered on top of this default.
      *
      * PxDIR: 1 = output, 0 = input.  PxOUT: output level (or pull direction
      * when the resistor enable PxREN is set). */
@@ -72,7 +90,7 @@ static void gpio_init(void)
      *   PxREN.n = 1 -> internal resistor enabled
      *   PxOUT.n = 1 -> resistor pulls UP
      * Polled every tick in main(); no port interrupt is needed because the
-     * firmware is already awake at 100 Hz. */
+     * firmware runs continuously and looks at the pins 100 times a second. */
     P4DIR &= (uint8_t)~BIT5;
     P4REN |= BIT5;
     P4OUT |= BIT5;
@@ -80,29 +98,27 @@ static void gpio_init(void)
     P1REN |= BIT1;
     P1OUT |= BIT1;
 
-    /* LFXIN (PJ.4) and LFXOUT (PJ.5): hand both pins to the low-frequency
-     * crystal oscillator. On the LaunchPad those two pins carry the board's
-     * own 32.768 kHz crystal Y4 (LP guide §2.2.2, p. 8; schematic p. 37),
-     * which is the sample timebase - nothing is wired to them.
-     *
-     * Crystal mode uses BOTH pins (the oscillator drives LFXOUT and senses
-     * LFXIN), so both select bits are set here; function select for the LFX
-     * pins is PJSEL1=0, PJSEL0=1. */
-    PJSEL0 |= BIT4 | BIT5;
-    PJSEL1 &= (uint8_t)~(BIT4 | BIT5);
+    /* PJ.4/PJ.5 (LFXIN/LFXOUT) need no special handling: with LFXT off they
+     * are left in the "output low" default written above, which is the
+     * recommended state for an unused pin. The LaunchPad's crystal Y4 is
+     * still fitted across them (LP guide §2.2.2, p. 8; schematic p. 37) but
+     * it is a passive part - held statically at 0 V on both ends it simply
+     * does not oscillate and draws no current. Neither pin reaches a header,
+     * so nothing else can be affected. */
 }
 
-uint8_t clock_init(void)
+void clock_init(void)
 {
-    uint8_t status = 0;
-
     gpio_init();
 
     /* FRAM-family gotcha: out of reset, all I/O is held in high-impedance by
-     * a latch, and everything configured above only takes effect once the
-     * LOCKLPM5 bit in the power-management register is cleared. Do this
-     * after configuring the ports so the pins snap directly to their final
-     * states with no glitch. */
+     * a latch, and everything configured above only takes effect once that
+     * latch is released by clearing the LOCKLPM5 bit in the power-management
+     * register. The bit is named for a state this firmware never enters; here
+     * it is purely the "release the I/O latch" switch, and without this write
+     * no pin configuration reaches the outside world. Do this after
+     * configuring the ports so the pins snap directly to their final states
+     * with no glitch. */
     PM5CTL0 &= ~LOCKLPM5;
 
     /* FRAM wait state: FRAM reads are only spec'd to 8 MHz. To run MCLK at
@@ -119,71 +135,50 @@ uint8_t clock_init(void)
 
     /* DCO (internal digitally-controlled oscillator) frequency select:
      * DCORSEL picks the high-frequency range, DCOFSEL_4 picks 16 MHz within
-     * that range (per the FR5969 datasheet DCO table). */
+     * that range (per the FR5969 datasheet DCO table). This is the CPU clock
+     * AND the peripheral clock — every clock in the system now derives from
+     * it apart from the parked ACLK. */
     CSCTL1 = DCOFSEL_4 | DCORSEL;
 
     /* Clock-source multiplexers, one field per system clock:
-     *   SELA__LFXTCLK -> ACLK  from LFXT (the onboard 32.768 kHz crystal)
-     *   SELS__DCOCLK  -> SMCLK from the DCO
-     *   SELM__DCOCLK  -> MCLK  from the DCO                                 */
-    CSCTL2 = SELA__LFXTCLK | SELS__DCOCLK | SELM__DCOCLK;
-
-    /* Per-clock dividers:
-     *   ACLK  /1 -> 32768 Hz
-     *   SMCLK /2 -> 8 MHz   (this is the SPI reference)
-     *   MCLK  /1 -> 16 MHz                                                   */
-    CSCTL3 = DIVA__1 | DIVS__2 | DIVM__1;
-
-    /* Oscillator control:
-     *   LFXTDRIVE_2    : oscillator drive level. The data sheet brackets the
-     *                    four settings by effective load capacitance (MCU
-     *                    Table 5-4, p. 26): {2} covers 6..9 pF, and the
-     *                    LaunchPad's Y4 is a 7 pF crystal (LP schematic,
-     *                    p. 37), so {2} is the matched setting.
-     *   LFXTBYPASS = 0 : (implicit, bit not set) crystal mode — the on-chip
-     *                    oscillator drives Y4.
-     *   LFXTOFF    = 0 : (implicit, bit not set) LFXT enabled.
-     *   HFXTOFF    = 1 : keep the unused high-frequency crystal input OFF —
-     *                    if HFXT were enabled with nothing attached its fault
-     *                    flag would latch the global OFIFG forever.          */
-    CSCTL4 = LFXTDRIVE_2 | HFXTOFF;
-
-    /* Oscillator-fault handshake: LFXTOFFG (in CSCTL5) latches whenever LFXT
-     * is not oscillating cleanly, and it feeds the global oscillator-fault
-     * flag OFIFG (in SFRIFG1). While a fault is latched, ACLK is internally
-     * substituted from a fallback source. The bring-up idiom is: clear both
-     * flags, wait, re-test — if the crystal is running they STAY cleared; if
-     * not, they re-latch and we go round again.
+     *   SELA__VLOCLK -> ACLK  from the internal VLO (~9.4 kHz)
+     *   SELS__DCOCLK -> SMCLK from the DCO
+     *   SELM__DCOCLK -> MCLK  from the DCO
      *
-     * A 32 kHz crystal is SLOW to start: it needs hundreds of milliseconds to
-     * reach amplitude, and until it does LFXTOFFG re-latches as fast as this
-     * loop can clear it. Hence a real 10 ms delay per pass — a tight spin
-     * would give up on every healthy cold boot. Worst case the whole window
-     * is LFXT_SETTLE_TRIES x 10 ms (~1 s), and only then does the firmware
-     * declare the crystal dead: bounded, so it can never hang the boot. */
-    {
-        uint16_t tries = LFXT_SETTLE_TRIES;
-        do {
-            CSCTL5 &= ~(LFXTOFFG | HFXTOFFG);   /* clear the sticky faults    */
-            SFRIFG1 &= ~OFIFG;                  /* clear the summary flag     */
-            __delay_cycles(MCLK_HZ / 100uL);    /* 10 ms at 16 MHz MCLK       */
-        } while ((SFRIFG1 & OFIFG) && --tries); /* re-latched? -> not up yet  */
+     * ACLK is deliberately pointed at the VLO rather than left at its reset
+     * default of LFXTCLK: with no crystal running, an ACLK still selecting
+     * LFXT would keep requesting a dead oscillator and keep OFIFG latched.
+     * Nothing is timed from ACLK — the tick timer runs from SMCLK — so the
+     * VLO's poor accuracy is irrelevant; this is just a safe parking spot. */
+    CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
 
-        if (tries == 0u) {
-            /* The crystal never started — Y4 missing, damaged, or its pads
-             * lifted by rework. Re-route ACLK to the internal VLO (~9.4 kHz,
-             * very inaccurate — we don't time from it; the tick timer will
-             * use SMCLK instead, see timer_init()), clear the now-expected
-             * faults once more, and report the condition. */
-            CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
-            CSCTL5 &= ~(LFXTOFFG | HFXTOFFG);
-            SFRIFG1 &= ~OFIFG;
-            status |= ST_NO_LFXT;
-        }
-    }
+    /* Per-clock dividers - none of them divide:
+     *   ACLK  /1 -> ~9.4 kHz (unused)
+     *   SMCLK /1 -> 16 MHz   (SPI reference and tick-timer source)
+     *   MCLK  /1 -> 16 MHz   (CPU)
+     * SMCLK is deliberately left equal to MCLK so there is a single system
+     * frequency to reason about; the only other rate in the design is the
+     * 0.5 MHz ADC bit clock, which eUSCI_B0 divides down itself (/32).      */
+    CSCTL3 = DIVA__1 | DIVS__1 | DIVM__1;
+
+    /* Oscillator control — both crystal oscillators OFF:
+     *   LFXTOFF = 1 : the low-frequency crystal oscillator is disabled. The
+     *                 LaunchPad's Y4 is left fitted but never driven, and
+     *                 PJ.4/PJ.5 stay plain GPIO (see gpio_init()).
+     *   HFXTOFF = 1 : the high-frequency crystal input stays off too —
+     *                 nothing is attached to it on this board.
+     * An oscillator that is off cannot fault, so there is no start-up wait
+     * and no fault-retry loop here any more. */
+    CSCTL4 = LFXTOFF | HFXTOFF;
+
+    /* Clear the sticky oscillator-fault flags once. Out of reset ACLK
+     * momentarily selects LFXTCLK, which is long enough to latch LFXTOFFG
+     * and the global OFIFG summary flag before the writes above take effect.
+     * With both oscillators now disabled and nothing sourcing from them, the
+     * flags stay clear — no re-test loop is needed. */
+    CSCTL5 &= ~(LFXTOFFG | HFXTOFFG);
+    SFRIFG1 &= ~OFIFG;
 
     /* Re-lock the clock registers (any non-0xA5 high byte locks). */
     CSCTL0_H = 0;
-
-    return status;
 }

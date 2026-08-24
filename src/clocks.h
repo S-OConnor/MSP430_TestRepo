@@ -3,13 +3,15 @@
 
 #include <stdint.h>
 
-/* Configure GPIO map, unlock LPM5, set FRAM wait state, and bring up
- * MCLK 16 MHz / SMCLK 8 MHz / ACLK = LFXT crystal mode on the LaunchPad's
- * onboard 32.768 kHz crystal Y4 (PJ.4/PJ.5).
- * Returns 0 on success or ST_NO_LFXT if the crystal never started within the
- * ~1 s start-up window (ACLK then runs from VLO and the tick timer must use
- * SMCLK instead). Note that a failed start-up therefore costs ~1 s of boot
- * time; a healthy crystal usually settles in a fraction of that. */
-uint8_t clock_init(void);
+/* Configure the GPIO map, release the I/O latch (PM5CTL0), set the FRAM wait
+ * state, and bring up MCLK = SMCLK = 16 MHz from the internal DCO, with ACLK
+ * parked on the VLO. Those 16 MHz and the 0.5 MHz ADC bit clock derived from
+ * them in spi_init() are the only two rates in the design; the CPU runs
+ * continuously and never enters a sleep state.
+ *
+ * No crystal is used - LFXT and HFXT are both held off - so there is nothing
+ * that can fail to start, no start-up window to wait through, and no status to
+ * report. Everything therefore runs at DCO accuracy (~+-2 %). */
+void clock_init(void);
 
 #endif /* CLOCKS_H */

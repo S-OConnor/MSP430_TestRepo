@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate docs/img/config-read-timing.svg — one column per statement in the
+"""Generate docs/img/config-read-timing.svg — the two accesses of the
 CONFIG-readback path (adc168_config_cycle(): the init link check, and the
 idle phase's once-a-second probe). Run from the repo root."""
 
@@ -14,14 +14,14 @@ X0       = LEFT + LABEL_W
 BYTE_W = 8 * CLK_W + 6
 COLS = [
     dict(code="ADC_CS_LOW()",   kind="cs",   w=96.0),
-    dict(code="ADC_RD_PULSE()", kind="rd",   w=92.0),
-    dict(code="spi_xfer(0x10)", kind="byte", w=BYTE_W, mosi=0x10),
-    dict(code="spi_xfer(0x41)", kind="byte", w=BYTE_W, mosi=0x41),
-    dict(code="spi_xfer(0x00)", kind="byte", w=BYTE_W, mosi=0x00),
-    dict(code="ADC_RD_PULSE()", kind="rd",   w=92.0),
-    dict(code="spi_xfer(0x00)", kind="byte", w=BYTE_W, mosi=0x00, miso=0x04),
-    dict(code="spi_xfer(0x00)", kind="byte", w=BYTE_W, mosi=0x00, miso=0x10),
-    dict(code="spi_xfer(0x00)", kind="byte", w=BYTE_W, mosi=0x00, miso=0x40,
+    dict(code="RD \u2191", kind="rd",   w=64.0),
+    dict(code="tx 0x10",  kind="byte", w=BYTE_W, mosi=0x10),
+    dict(code="tx 0x41",  kind="byte", w=BYTE_W, mosi=0x41),
+    dict(code="tx 0x00",  kind="byte", w=BYTE_W, mosi=0x00),
+    dict(code="RD \u2191", kind="rd",   w=64.0),
+    dict(code="tx 0x00",  kind="byte", w=BYTE_W, mosi=0x00, miso=0x04),
+    dict(code="tx 0x00",  kind="byte", w=BYTE_W, mosi=0x00, miso=0x10),
+    dict(code="tx 0x00",  kind="byte", w=BYTE_W, mosi=0x00, miso=0x40,
          miso_care=4),
 ]
 TAIL = 26.0
@@ -97,11 +97,11 @@ add('<defs><pattern id="xc" width="6" height="6" patternUnits="userSpaceOnUse" '
     '</pattern></defs>')
 add(f'<rect width="{WIDTH:.0f}" height="{HEIGHT:.0f}" fill="{BG}"/>')
 
-text(LEFT, Y_TITLE, "Reading the ADC CONFIG register — one column per statement",
+text(LEFT, Y_TITLE, "Reading the ADC CONFIG register — RD strobed against the burst",
      size=18, weight="700", anchor="start", family=SANS)
 text(LEFT, Y_SUB, "adc168_config_cycle(): write CONFIG 0x1041, then clock the "
      "reply off SDOA — the init link check, and the idle phase once a second.  "
-     "SCLK 8 MHz, CPOL=0/CPHA=1, MSB first.",
+     "SCLK 0.5 MHz, CPOL=0/CPHA=1, MSB first.",
      size=11.5, fill=DIM, anchor="start", family=SANS)
 
 # ---- function brackets + per-column code labels -------------------------
@@ -114,8 +114,8 @@ def fbracket(i0, i1, label):
     line(xb, Y_FUNCLN - 5, xb, Y_FUNCLN, DIM, 1.0)
     text((xa + xb) / 2, Y_FUNC, label, size=12, weight="700", family=SANS)
 
-fbracket(1, 4, "write_word(0x1041)")
-fbracket(5, 8, "read_word()")
+fbracket(1, 4, "write_word(0x1041) \u2192 spi_burst_strobe(\u2026, RD)")
+fbracket(5, 8, "read_word() \u2192 spi_burst_strobe(\u2026, RD)")
 
 for i, c in enumerate(COLS):
     line(cx0(i), Y_CODE + 6, cx0(i), Y_BOT + 16, DOT, 1.0, dash="3 3")
@@ -150,21 +150,23 @@ poly([(X0, hi("~CS")), (xm - 5, hi("~CS")), (xm + 5, lo("~CS")), (RIGHT, lo("~CS
 # ---- CONVST / BUSY: never move ------------------------------------------
 poly([(X0, lo("CONVST")), (RIGHT, lo("CONVST"))], COLOR["CONVST"])
 text(cx0(1) + 8, hi("CONVST") + 11,
-     "ADC_CONVST_PULSE() is never called here — a register access starts no conversion",
+     "CONVST never moves here — a register access starts no conversion",
      size=9.5, fill=DIM, anchor="start", family=SANS, halo=True)
 poly([(X0, lo("BUSY")), (RIGHT, lo("BUSY"))], COLOR["BUSY"])
 text(cx0(1) + 8, hi("BUSY") + 11, "so BUSY never rises", size=9.5, fill=DIM,
      anchor="start", family=SANS, halo=True)
 
-# ---- RD: high for the strobe column, falling edge on its trailing dotted line
+# ---- RD: rises just before the burst, released on the burst's 2nd rising SCLK
 pts = [(X0, lo("RD"))]
 for i, c in enumerate(COLS):
     if c["kind"] != "rd":
         continue
-    pts += [(cx0(i) + 6, lo("RD")), (cx0(i) + 6, hi("RD")),
-            (cx1(i), hi("RD")), (cx1(i), lo("RD"))]
-    text(cx1(i) - 3, hi("RD") - 7, "falling edge ▼", size=9, fill=COLOR["RD"],
-         anchor="end", family=SANS, halo=True)
+    x_up   = cx1(i) - 10                      # ~t1 before the first clock
+    x_down = cx0(i + 1) + 3 + 2 * CLK_W       # 2nd rising CLOCK edge
+    pts += [(x_up, lo("RD")), (x_up, hi("RD")),
+            (x_down, hi("RD")), (x_down, lo("RD"))]
+    text(x_down + 3, hi("RD") - 7, "\u25bc released on rising edge 2", size=9,
+         fill=COLOR["RD"], anchor="start", family=SANS, halo=True)
 pts.append((RIGHT, lo("RD")))
 poly(pts, COLOR["RD"])
 
@@ -200,10 +202,10 @@ text((cx0(0) + cx0(6)) / 2, hi("MISO") + 13,
 
 # ---- notes ---------------------------------------------------------------
 notes = [
- "Dotted verticals are statement boundaries. Each spi_xfer() is one gated burst of 8 SCLK cycles; "
- "between bursts the clock is parked low, which is why the strobes can be moved at all.",
- "RD idles low; ADC_RD_PULSE() drives it high then low, and the falling edge — the last thing before the "
- "first clock burst — is what opens the access.",
+ "Dotted verticals are byte boundaries inside ONE burst: the three bytes of an access are clocked back to "
+ "back, 24 unbroken SCLK cycles. Between accesses the clock is parked low, which is why RD can be moved at all.",
+ "RD idles low. spi_burst_strobe() raises it a few hundred ns before the burst's first rising CLOCK edge (t1), holds it "
+ "across that edge, and releases it on the SECOND rising edge — a high time of about one CLOCK period (t3).",
  "read_word() strips the frame's 2 leading indicator bits and trailing zeros: "
  "0x04 0x10 0x40 → 0x1041. The last 4 clocks are padding past the 20-bit frame.",
 ]
