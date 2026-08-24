@@ -62,7 +62,7 @@ Each `spi_burst()` is **one unbroken run of 24 clocks** — the byte boundaries
 inside it are invisible on the CLOCK lane, because the eUSCI's transmit buffer
 is reloaded while the previous byte is still shifting. MOSI/MISO show the
 actual bit levels, MSB first. The clock is parked low only *between* accesses,
-and that is where the strobes move. At `ADC_SCLK_DIV = 16` a cycle is 2 µs
+and that is where the strobes move. At `ADC_SCLK_DIV = 32` a cycle is 2 µs
 (0.5 MHz), so each access is 48 µs and the pair is ~96 µs of bus time.
 
 If you see the clock stall for roughly a bit time at each byte boundary, or a
@@ -129,7 +129,7 @@ only visible difference from the special-read arrangement.
 | **SDOA** | P1.7 ← J5.1 | Silent until the first RD falls, then 20 bits of frame A (CHA1); silent again, then 20 bits of frame B (CHB1). The 4 trailing clocks of each burst are padding. |
 | **SDI** | P1.6 → J5.15 | `0x40 0x00` — the constant channel command (`C = 01`, `R = 00` "update C only"). Latched during the first 16 clocks of *each* read access; re-asserting the same pair twice is harmless. |
 
-At `ADC_SCLK_DIV = 16` a clock cycle is 2 µs (0.5 MHz), so each of the three
+At `ADC_SCLK_DIV = 32` a clock cycle is 2 µs (0.5 MHz), so each of the three
 bursts is 48 µs of unbroken clocking. The gaps *between* bursts are CPU
 overhead, not specified delays — but each strobe sits tight against the burst
 it opens (a few hundred ns, fixed), because `spi_wait_ready()` does the

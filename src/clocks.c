@@ -5,12 +5,18 @@
  * =============================================================================
  *  GPIO + clock-system bring-up for the MSP430FR5969
  * =============================================================================
- *  Target clock tree:
+ *  Target clock tree - the whole system runs at ONE rate, and the ADC bus at
+ *  one divided rate; those two numbers are the only timings in the design:
  *    MCLK  (CPU)        = DCO 16 MHz          (needs 1 FRAM wait state)
- *    SMCLK (peripherals)= DCO / 2 = 8 MHz     (SPI bit clock /16 -> 0.5 MHz,
- *                                              and the tick timer via /8)
+ *    SMCLK (peripherals)= DCO 16 MHz          (undivided; SPI bit clock /32
+ *                                              -> 0.5 MHz, and the tick timer
+ *                                              via /8)
  *    ACLK               = VLO ~9.4 kHz        (parked; nothing is timed
  *                                              from it)
+ *
+ *  The CPU is never stopped. It runs flat out at 16 MHz from reset onward and
+ *  busy-waits between ticks; no sleep or low-power state is entered anywhere
+ *  in this firmware.
  *
  *  NO CRYSTAL IS USED. Both crystal oscillators are held off (LFXTOFF,
  *  HFXTOFF), so PJ.4/PJ.5 stay plain GPIO, the LaunchPad's Y4 sits idle, and
@@ -28,9 +34,9 @@
 static void gpio_init(void)
 {
     /* Drive every pin as an output at logic 0 first. Unconfigured CMOS inputs
-     * float and burn current / pick up noise; TI's low-power app notes
-     * recommend "all unused pins output low" as the safe baseline. The real
-     * pin functions are then layered on top of this default.
+     * float, which lets them oscillate and pick up noise; TI's application
+     * notes recommend "all unused pins output low" as the safe baseline. The
+     * real pin functions are then layered on top of this default.
      *
      * PxDIR: 1 = output, 0 = input.  PxOUT: output level (or pull direction
      * when the resistor enable PxREN is set). */
@@ -84,7 +90,7 @@ static void gpio_init(void)
      *   PxREN.n = 1 -> internal resistor enabled
      *   PxOUT.n = 1 -> resistor pulls UP
      * Polled every tick in main(); no port interrupt is needed because the
-     * firmware is already awake at 100 Hz. */
+     * firmware runs continuously and looks at the pins 100 times a second. */
     P4DIR &= (uint8_t)~BIT5;
     P4REN |= BIT5;
     P4OUT |= BIT5;
@@ -106,10 +112,13 @@ void clock_init(void)
     gpio_init();
 
     /* FRAM-family gotcha: out of reset, all I/O is held in high-impedance by
-     * a latch, and everything configured above only takes effect once the
-     * LOCKLPM5 bit in the power-management register is cleared. Do this
-     * after configuring the ports so the pins snap directly to their final
-     * states with no glitch. */
+     * a latch, and everything configured above only takes effect once that
+     * latch is released by clearing the LOCKLPM5 bit in the power-management
+     * register. The bit is named for a state this firmware never enters; here
+     * it is purely the "release the I/O latch" switch, and without this write
+     * no pin configuration reaches the outside world. Do this after
+     * configuring the ports so the pins snap directly to their final states
+     * with no glitch. */
     PM5CTL0 &= ~LOCKLPM5;
 
     /* FRAM wait state: FRAM reads are only spec'd to 8 MHz. To run MCLK at
@@ -127,8 +136,8 @@ void clock_init(void)
     /* DCO (internal digitally-controlled oscillator) frequency select:
      * DCORSEL picks the high-frequency range, DCOFSEL_4 picks 16 MHz within
      * that range (per the FR5969 datasheet DCO table). This is the CPU clock
-     * and, halved, the peripheral clock — every clock in the system now
-     * derives from it apart from the parked ACLK. */
+     * AND the peripheral clock — every clock in the system now derives from
+     * it apart from the parked ACLK. */
     CSCTL1 = DCOFSEL_4 | DCORSEL;
 
     /* Clock-source multiplexers, one field per system clock:
@@ -143,11 +152,14 @@ void clock_init(void)
      * VLO's poor accuracy is irrelevant; this is just a safe parking spot. */
     CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
 
-    /* Per-clock dividers:
+    /* Per-clock dividers - none of them divide:
      *   ACLK  /1 -> ~9.4 kHz (unused)
-     *   SMCLK /2 -> 8 MHz    (SPI reference and tick-timer source)
-     *   MCLK  /1 -> 16 MHz   (CPU)                                           */
-    CSCTL3 = DIVA__1 | DIVS__2 | DIVM__1;
+     *   SMCLK /1 -> 16 MHz   (SPI reference and tick-timer source)
+     *   MCLK  /1 -> 16 MHz   (CPU)
+     * SMCLK is deliberately left equal to MCLK so there is a single system
+     * frequency to reason about; the only other rate in the design is the
+     * 0.5 MHz ADC bit clock, which eUSCI_B0 divides down itself (/32).      */
+    CSCTL3 = DIVA__1 | DIVS__1 | DIVM__1;
 
     /* Oscillator control — both crystal oscillators OFF:
      *   LFXTOFF = 1 : the low-frequency crystal oscillator is disabled. The

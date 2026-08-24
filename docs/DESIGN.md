@@ -118,7 +118,7 @@ flowchart LR
 
     subgraph LP["MSP430FR5969 LaunchPad"]
         MCU["firmware<br/>tick + ADC driver"]
-        DCO["internal DCO<br/>16 MHz MCLK / 8 MHz SMCLK<br/>no crystal used"]
+        DCO["internal DCO<br/>16 MHz MCLK / 16 MHz SMCLK<br/>no crystal used"]
     end
 
     SCOPE["scope / logic analyzer<br/>THE measurement point"]
@@ -143,14 +143,14 @@ flowchart LR
 
 | Decision | Choice | Why |
 |---|---|---|
-| ADC interface | eUSCI_B0 SPI at **0.5 MHz** for CLOCK/SDI/SDOA + three GPIO strobes | The ADC's clock doubles as its conversion clock and the datasheet permits a gated ("burst") clock — which is exactly what an SPI master produces ([§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)). Half-clock mode accepts 0.5–20 MHz *(ADC §6.3.1.4, p. 19)*, and this build sits at the bottom of that range: SMCLK 8 MHz ÷ `ADC_SCLK_DIV` 16. The slow clock is deliberate — 2 µs per bit is enormous setup/hold margin for jumper-wired signals, and it makes the ~190 ns CONVST/RD strobes shorter than one CLOCK period outright, satisfying the datasheet's pulse-width rule literally rather than only via the gated-clock argument (risk A in PLAN.md). One conversion still costs only ~135 µs out of a 10 ms tick, so nothing is given up. |
+| ADC interface | eUSCI_B0 SPI at **0.5 MHz** for CLOCK/SDI/SDOA + three GPIO strobes | The ADC's clock doubles as its conversion clock and the datasheet permits a gated ("burst") clock — which is exactly what an SPI master produces ([§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)). Half-clock mode accepts 0.5–20 MHz *(ADC §6.3.1.4, p. 19)*, and this build sits at the bottom of that range: SMCLK 16 MHz ÷ `ADC_SCLK_DIV` 32. The slow clock is deliberate — 2 µs per bit is enormous setup/hold margin for jumper-wired signals, and it makes the ~190 ns CONVST/RD strobes shorter than one CLOCK period outright, satisfying the datasheet's pulse-width rule literally rather than only via the gated-clock argument (risk A in PLAN.md). One conversion still costs only ~135 µs out of a 10 ms tick, so nothing is given up. |
 | ADC operating mode | **Plain Mode II** (M0 strapped low), special read **off** (SR=0), pseudo-differential (PDE=1) | Mode II = M0 0, M1 1: manual channel select, SDOA only *(ADC Table 6-5, p. 21)* — M1 high is also what deactivates SDOB, so SDOA is the one serial output. With SR=0 a read access returns one 20-bit frame *(ADC §6.5.2.2, p. 26)*, so the pair's two results take two read accesses (RD + 24 clocks each) instead of one 40-clock burst. It costs one extra strobe and 8 clocks a tick; in exchange every access on the bus has the same shape — RD plus three bytes — whether it carries a register value or half a conversion, and the frame decoder is one routine rather than two. The internal 2.5 V reference is routed as common mode by software, so the EVM needs no jumper changes. |
 | Strobe/clock alignment | Every access is one `spi_burst()` — a contiguous train of clocks, with `spi_wait_ready()` called *before* the strobe that opens it | The ADC captures RD on a CLOCK falling edge and starts a conversion on the first rising edge after CONVST, so it cares where the strobes sit relative to the clock. A byte-at-a-time routine that waits for `UCRXIFG` before returning empties the shift register at every byte boundary and puts an open-ended poll between the strobe and the first edge. Reloading `UCB0TXBUF` on `UCTXIFG` instead — while the previous byte is still shifting — keeps the clock unbroken, and moving the wait ahead of the strobe makes the strobe→clock gap a fixed handful of cycles ([§6](#6-what-spi-is)). |
 | Input mux | Pseudo-differential **4:1** configuration (`PDE=1`, ADC Table 6-2, p. 17), channel picked by CONFIG `C[1:0]` | Gives four single-ended inputs per converter measured against a common mode, which is what this application wants. `M0 = 0` keeps selection *manual* through `C[1:0]`; the SEQFIFO sequencer applies only to automatic mode (`M0 = 1`) *(ADC §6.3.2.1, p. 21)* and is left at its reset default. |
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
 | Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
 | Button input | S1 (P4.5) and S2 (P1.1), internal pull-ups, **polled** once per tick with a 2-poll (20 ms) debounce — no port interrupt | The CPU already wakes every 10 ms, so the poll is free and the tick spacing *is* the debounce: no second timer, no ISR firing a dozen times inside one contact bounce. Both buttons do the same thing, so the firmware never has to tell them apart. The LaunchPad wires each switch straight to GND with no external pull-up *(LP schematic, p. 37)*, hence `PxREN` + `PxOUT = 1` and active-low sensing. |
-| Sample timebase | **No crystal.** Timer_A0 from SMCLK/8 = 1 MHz, period 10000 → exactly 100.000 Hz, all of it derived from the internal DCO | The tick's only job is to space the ADC bursts evenly; nothing measures absolute time from it, so the DCO's ~±2 % is ample and a crystal buys nothing the application can use. Dropping it removes the oscillator-fault handshake, the ~1 s crystal start-up window at every boot, and a whole failure mode — LFXT and HFXT are simply held off, PJ.4/PJ.5 stay plain GPIO, and 1 MHz ÷ 10000 lands on 100.000 Hz exactly, which 32768 Hz never could ([§12](#12-timing-the-100-hz-tick)). |
+| Sample timebase | **No crystal.** Timer_A0 from SMCLK/8 = 2 MHz, period 20000 → exactly 100.000 Hz, all of it derived from the internal DCO | The tick's only job is to space the ADC bursts evenly; nothing measures absolute time from it, so the DCO's ~±2 % is ample and a crystal buys nothing the application can use. Dropping it removes the oscillator-fault handshake, the ~1 s crystal start-up window at every boot, and a whole failure mode — LFXT and HFXT are simply held off, PJ.4/PJ.5 stay plain GPIO, and 2 MHz ÷ 20000 lands on 100.000 Hz exactly, which 32768 Hz never could ([§12](#12-timing-the-100-hz-tick)). |
 | Readout | None from the MCU — the ADC bus itself is the measurement point | The scope has to be on the bus during bring-up anyway, and SDOA already carries both results in full 16-bit resolution. Dropping the UART removes a peripheral, an ISR, a 256-byte buffer and a whole class of "did the host keep up?" failure from the tick path. |
 | Status reporting | Two LEDs, plus every computed value held in a `volatile` global for the debugger | Enough to tell "alive and ticking" from "something is wrong" at a glance — and, because the heartbeat rate doubles at the phase change, which phase the board is in; `mspdebug` supplies the detail when the LED says to look. |
 | Integrity | Every ADC frame carries fixed indicator/zero bits which are checked on every read *(ADC Figure 6-7, p. 27)* | Cheap, continuous self-test of wiring and clock phase; failures are counted in the `errs` column and light the error LED. |
@@ -162,7 +162,7 @@ flowchart LR
 src/
 ├── board.h        pin map, tunables (channel pair, SCLK divider, tick
 │                 period), pin macros
-├── clocks.c/.h    GPIO setup, LPM5 unlock, FRAM wait state, DCO clocks
+├── clocks.c/.h    GPIO setup, I/O latch release, FRAM wait state, DCO clocks
 ├── spi.c/.h       eUSCI_B0 SPI master, blocking byte exchange
 ├── adc168m102.c/.h ADC driver: init sequence, conversion + readout
 └── main.c         phase state machine, tick timer, button poll,
@@ -174,7 +174,7 @@ Layering (arrows = "uses"):
 ```mermaid
 flowchart TD
     main["main.c<br/>phase state machine, tick timer,<br/>button poll, sample loop,<br/>LEDs, observable globals"]
-    clocks["clocks.c/.h<br/>GPIO, LPM5 unlock,<br/>FRAM wait state, DCO clocks"]
+    clocks["clocks.c/.h<br/>GPIO, I/O latch release,<br/>FRAM wait state, DCO clocks"]
     adc["adc168m102.c/.h<br/>init sequence,<br/>conversion + readout"]
     spi["spi.c/.h<br/>eUSCI_B0 SPI master,<br/>blocking byte exchange"]
     board["board.h<br/>pin map + tunables<br/>+ msp430.h device header"]
@@ -193,30 +193,30 @@ flowchart TD
 ```mermaid
 flowchart TD
     PO([power-on]) --> WDT["stop watchdog"]
-    WDT --> CLK["clocks: DCO 16 MHz MCLK,<br/>8 MHz SMCLK, ACLK parked on VLO<br/>(no crystal, nothing to wait for)"]
+    WDT --> CLK["clocks: DCO 16 MHz MCLK,<br/>16 MHz SMCLK, ACLK parked on VLO<br/>(no crystal, nothing to wait for)"]
     CLK --> SPI
-    SPI["init eUSCI_B0 SPI<br/>SCLK = SMCLK/16 = 0.5 MHz"] --> AINIT["ADC reset / CONFIG readback link check /<br/>references / arm streaming"]
+    SPI["init eUSCI_B0 SPI<br/>SCLK = SMCLK/32 = 0.5 MHz"] --> AINIT["ADC reset / CONFIG readback link check /<br/>references / arm streaming"]
     AINIT --> OK{"readback mode bits<br/>11:4 == 0x04?"}
     OK -->|yes| T0
     OK -->|no| NOLINK["g_status: ST_ADC_NOLINK set<br/>error LED on, keep running"] --> T0
-    T0["start Timer_A0<br/>g_phase = PHASE_IDLE"] --> SLEEP
+    T0["start Timer_A0<br/>g_phase = PHASE_IDLE"] --> WAIT
 
-    SLEEP["sleep in LPM0"] -->|"timer ISR every ~10 ms:<br/>set flag, wake CPU"| PHASE{"g_phase?"}
+    WAIT["busy-wait on the tick flag<br/>(CPU running at 16 MHz)"] -->|"timer ISR every ~10 ms:<br/>set flag"| PHASE{"g_phase?"}
 
     PHASE -->|idle| BTN{"S1 or S2 low on<br/>2 consecutive polls?"}
-    BTN -->|yes| ARM["adc168_start_stream:<br/>write operating CONFIG,<br/>2 flush conversions<br/>g_phase = PHASE_STREAM"] --> SLEEP
+    BTN -->|yes| ARM["adc168_start_stream:<br/>write operating CONFIG,<br/>2 flush conversions<br/>g_phase = PHASE_STREAM"] --> WAIT
     BTN -->|no| NTH{"100th tick<br/>since last probe?"}
-    NTH -->|no| SLEEP
+    NTH -->|no| WAIT
     NTH -->|yes| PROBE["adc168_config_cycle:<br/>write 0x1041, RD, read 3 bytes"] --> CFGOK{"readback<br/>mode bits ok?"}
     CFGOK -->|yes| IDLED
     CFGOK -->|no| CFGERR["g_err_cfg++<br/>latch error LED"] --> IDLED
-    IDLED["publish g_cfg / g_cfg_cycles<br/>heartbeat LED toggles<br/>once per probe = 0.5 Hz"] --> SLEEP
+    IDLED["publish g_cfg / g_cfg_cycles<br/>heartbeat LED toggles<br/>once per probe = 0.5 Hz"] --> WAIT
 
     PHASE -->|streaming| READ["adc168_read:<br/>CONVST, 24 clocks,<br/>wait BUSY low, then<br/>RD + 24 clocks twice,<br/>parse + validate"]
     READ --> VALID{"frame valid?"}
     VALID -->|yes| PUB["publish g_sample_a / g_sample_b / g_tick"]
     VALID -->|no| ERR["both samples = -32768<br/>g_err_frame / g_err_busy++<br/>latch error LED"] --> PUB
-    PUB --> LEDS["heartbeat LED toggles<br/>every 50 ticks = 1 Hz"] --> SLEEP
+    PUB --> LEDS["heartbeat LED toggles<br/>every 50 ticks = 1 Hz"] --> WAIT
 ```
 
 Both phases run off the same 100 Hz tick; only what a tick *does* changes.
@@ -232,8 +232,9 @@ the first readouts would arrive in the wrong framing and fail the frame check
 ([§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming)).
 
 Per-tick budget: ~135 µs on the ADC bus plus a few µs of bookkeeping while
-streaming (~100 µs once a second while idle), then the CPU sleeps. CPU
-utilisation is under 2 % while streaming and negligible while idle.
+streaming (~100 µs once a second while idle); the rest of the tick the CPU
+spins on the tick flag. Useful work is under 2 % of the tick while streaming
+and negligible while idle — the CPU itself never stops running.
 
 ---
 
@@ -489,10 +490,10 @@ SPI; TA0 is the 3-CCR Timer_A instance.)*
 
 ```mermaid
 flowchart LR
-    DCO["internal DCO<br/>16 MHz"] --> MCLK["MCLK<br/>16 MHz"] --> CPU["CPU<br/>+ 1 FRAM wait state"]
-    DCO -->|"/2"| SMCLK["SMCLK<br/>8 MHz"]
-    SMCLK -->|"/16"| SPI["eUSCI_B0 SPI<br/>0.5 MHz SCLK = ADC CLOCK"]
-    SMCLK -->|"/8 = 1 MHz"| TA0["Timer_A0<br/>CCR0 = 9999 -> 100.000 Hz<br/>sample tick"]
+    DCO["internal DCO<br/>16 MHz"] --> MCLK["MCLK<br/>16 MHz"] --> CPU["CPU<br/>always running<br/>+ 1 FRAM wait state"]
+    DCO -->|"/1"| SMCLK["SMCLK<br/>16 MHz"]
+    SMCLK -->|"/32"| SPI["eUSCI_B0 SPI<br/>0.5 MHz SCLK = ADC CLOCK"]
+    SMCLK -->|"/8 = 2 MHz"| TA0["Timer_A0<br/>CCR0 = 19999 -> 100.000 Hz<br/>sample tick"]
 
     VLO["internal VLO<br/>~9.4 kHz"] --> ACLK["ACLK<br/>parked, unused"]
     XTAL["LFXT / HFXT<br/>both held OFF"] -.->|"no crystal is used;<br/>Y4 sits idle"| ACLK
@@ -504,9 +505,11 @@ flowchart LR
   state* — the zero-wait-state limit is 8 MHz *(MCU pp. 17–18,
   `NWAITSx = 0` vs `= 1`)* — which is why `clocks.c` writes `FRCTL0` before
   raising the clock.
-- **SMCLK at 8 MHz** feeds everything else. The SPI divides it by 16 → 0.5 MHz
-  SCLK, which is the ADC's CLOCK; Timer_A0 divides it by 8 → 1 MHz, which is
-  the tick's timebase. The eUSCI's own SPI-master clock ceiling is in
+- **SMCLK at 16 MHz** feeds everything else. It is left *undivided*, equal to
+  MCLK, so the design has a single system frequency: the only other rate in it
+  is the ADC bus clock. The SPI divides SMCLK by 32 → 0.5 MHz SCLK, which is
+  the ADC's CLOCK; Timer_A0 divides it by 8 → 2 MHz, which is the tick's
+  timebase. The eUSCI's own SPI-master clock ceiling is in
   *(MCU Table 5-18, p. 38)* — irrelevant at this rate, but the reason the
   divider can be moved back up if the bus is ever wanted faster.
 - **No crystal at all.** Both oscillators are held off (`CSCTL4 =
@@ -526,6 +529,16 @@ flowchart LR
   default of LFXTCLK. Nothing is timed from ACLK, but pointing it at a
   disabled oscillator would keep requesting a dead source and keep the
   oscillator-fault flag latched, so the VLO is simply a safe parking spot.
+- **No low-power mode is used.** The CPU is clocked at 16 MHz from reset until
+  power-off and is never halted: between ticks `main()` busy-waits on the flag
+  the timer ISR raises, so `LPM0`–`LPM4` appear nowhere in the firmware. The
+  one register bit that still carries the name, `LOCKLPM5` in `PM5CTL0`, is the
+  FRAM-family I/O latch release and must be written for any pin configuration
+  to take effect ([§9.3](#93-pin-map)); it has nothing to do with entering a
+  low-power state here.
+- **Two timings, and only two.** 16 MHz for the CPU and every peripheral, and
+  0.5 MHz on the ADC bus. Timer_A0's 2 MHz count clock is an internal detail of
+  hitting 100.000 Hz exactly, and ACLK's ~9.4 kHz is parked and unused.
 - **Everything therefore runs at DCO accuracy, ~±2 %** — the tick, the SPI
   bursts and the millisecond `__delay_cycles()` waits alike.
 
@@ -1072,13 +1085,13 @@ field of the init CONFIG word, the C field of every per-conversion command,
 
 ## 12. Timing: the 100 Hz tick
 
-Timer_A0 counts SMCLK/8 pulses — 8 MHz ÷ 8 = 1 000 000 per second, straight
+Timer_A0 counts SMCLK/8 pulses — 16 MHz ÷ 8 = 2 000 000 per second, straight
 from the internal DCO ([§9.2](#92-clock-tree)) — in "up mode": it counts
-0 → CCR0, fires an interrupt, and starts over. With CCR0 = 9999 the period is
-10 000 counts:
+0 → CCR0, fires an interrupt, and starts over. With CCR0 = 19999 the period is
+20 000 counts:
 
 ```
-   1 000 000 Hz / 10 000 = 100.000 Hz     (10.000 ms per tick)
+   2 000 000 Hz / 20 000 = 100.000 Hz     (10.000 ms per tick)
 ```
 
 That divides exactly, which is the small bonus of dropping the crystal: 32 768
@@ -1090,12 +1103,28 @@ every result is timestamped by the scope, not by the MCU.
 
 To change the rate, change `TICK_PERIOD_SMCLK` in `board.h` — one constant.
 
-The interrupt handler only sets a flag and wakes the CPU. The main loop
-sleeps in **LPM0** between ticks — a low-power mode that stops the CPU but
-keeps SMCLK alive (currents in *MCU §5.6, p. 19*; wake-up to active mode is
-sub-microsecond, *MCU p. 31*). The deeper LPM3 would stop SMCLK, and SMCLK is
-exactly what clocks the tick timer — so LPM3 would leave the firmware asleep
-forever.
+The interrupt handler only sets a flag; it does nothing else. **The CPU is
+never stopped** — no low-power mode is entered anywhere in this firmware, so
+between ticks `main()` simply spins on that flag:
+
+```c
+    while (!g_tick_pending) {
+    }
+    g_tick_pending = false;
+```
+
+`g_tick_pending` is `volatile`, so the compiler must re-read it on every pass
+instead of hoisting the test out of the loop. Because the CPU stays running
+with interrupts enabled, the loop needs no interrupt-disable window: the flag
+is a single byte that cannot tear, and a tick arriving while the work below is
+still running just leaves the flag set, so the next pass falls straight
+through rather than waiting a full period.
+
+The cost is power, not correctness — the MCU draws active-mode current for the
+~98 % of each tick it spends spinning *(MCU §5.4 active-mode supply current,
+pp. 17–18)* rather than a far smaller idle current. That is the deliberate
+trade here: one CPU state, one system frequency, and nothing to reason about at
+a tick boundary.
 
 There is no fallback path and no crystal-failure flag any more: with the DCO
 as the only source, there is nothing to wait for at boot and nothing that can
@@ -1109,7 +1138,7 @@ ticks off that one timer:
 
 | Interval | Ticks | Constant (`board.h`) | Value |
 |---|---|---|---|
-| Sample period (streaming) | 1 | `TICK_PERIOD_SMCLK` | 10.000 ms |
+| Sample period (streaming) | 1 | `TICK_PERIOD_SMCLK` (20000 @ 2 MHz) | 10.000 ms |
 | Config probe period (idle) | 100 | `IDLE_CONFIG_TICKS` | ~1.0 s |
 | Button debounce | 2 | `BTN_DEBOUNCE_POLLS` | ~20 ms |
 | Heartbeat toggle (streaming) | 50 | — | 1 Hz blink |
@@ -1142,21 +1171,22 @@ sequenceDiagram
     participant B as ADC bus (scope)
     participant G as observable globals
 
-    Note over L: sleeping in LPM0
-    T->>L: t = 0 — CCR0 interrupt:<br/>g_tick_pending = 1, wake CPU
-    Note over L: t ~ 2 µs — main loop resumes
+    Note over L: spinning on the tick flag<br/>(CPU running at 16 MHz)
+    T->>L: t = 0 — CCR0 interrupt:<br/>g_tick_pending = 1
+    Note over L: t ~ 2 µs — wait loop falls through
     L->>D: t ~ 2 µs — call adc168_read
     D->>B: CONVST / 24 clocks / BUSY / RD+24 / RD+24
     Note over B: the whole burst the scope sees<br/>(~135 µs)
     B-->>D: frame A + frame B
     D-->>L: t ~ 137 µs — two 16-bit results
     L->>G: publish g_sample_a, g_sample_b, g_tick
-    Note over L: t ~ 140 µs — LED bookkeeping,<br/>back to LPM0
+    Note over L: t ~ 140 µs — LED bookkeeping,<br/>back to spinning
     Note over T,G: t = 10.00 ms — next tick
 ```
 
-CPU is awake well under 1 % of the time, and the bus is idle for 99.8 % of
-each tick — which is why a single-shot trigger on CONVST is unambiguous.
+The CPU does useful work for well under 1 % of the time — it spins for the
+rest — and the bus is idle for 99.8 % of each tick, which is why a single-shot
+trigger on CONVST is unambiguous.
 
 ### The other two kinds of tick
 
@@ -1171,24 +1201,24 @@ sequenceDiagram
     participant B as ADC bus (scope)
     participant G as observable globals
 
-    Note over L: sleeping in LPM0
-    T->>L: CCR0 interrupt: wake CPU
+    Note over L: spinning on the tick flag
+    T->>L: CCR0 interrupt: g_tick_pending = 1
     L->>L: poll S1 / S2 (~1 µs)
     alt not a probe tick (99 of every 100)
-        Note over L: back to LPM0 — bus stays silent
+        Note over L: back to spinning — bus stays silent
     else 100th tick
         L->>D: adc168_config_cycle()
         D->>B: RD + 24 clocks (write 0x1041),<br/>RD + 24 clocks (read reply)
         B-->>D: CONFIG readback
         D-->>L: raw word (~100 µs later)
         L->>G: publish g_cfg, g_cfg_cycles,<br/>g_err_cfg if the check fails
-        Note over L: heartbeat toggles, back to LPM0
+        Note over L: heartbeat toggles, back to spinning
     end
 ```
 
 And once, on the tick where the debounced press lands, a third kind: write
 `0x5040`, two flush conversions, `g_phase = PHASE_STREAM`, `g_tick = 0`, back
-to sleep — ~50 µs, no sample published. The first acquisition burst appears on
+to the wait loop — ~50 µs, no sample published. The first acquisition burst appears on
 the *next* tick, 10 ms later.
 
 ---
@@ -1354,8 +1384,9 @@ flowchart TD
 ## 17. Glossary
 
 - **ACLK / SMCLK / MCLK** — the MSP430's auxiliary, sub-main and main
-  clocks. Here MCLK (16 MHz) is the CPU clock and SMCLK (8 MHz) feeds both the
-  SPI and the tick timer; ACLK is parked on the VLO and unused.
+  clocks. Here MCLK (16 MHz) is the CPU clock and SMCLK, undivided at the same
+  16 MHz, feeds both the SPI and the tick timer; ACLK is parked on the VLO and
+  unused.
 - **BUSY** — ADC output, high during a conversion.
 - **Common mode** — the fixed voltage a pseudo-differential input is
   measured against (2.5 V here).
@@ -1378,10 +1409,9 @@ flowchart TD
 - **LFXT / LFXIN, LFXOUT** — the MSP430's low-frequency crystal oscillator and
   the two pins it drives. **Unused here:** LFXT is held off, so PJ.4/PJ.5 stay
   plain GPIO and the LaunchPad's onboard 32.768 kHz crystal Y4 never runs.
-- **VLO** — the MSP430's very-low-power internal oscillator, ~9.4 kHz and very
-  inaccurate. ACLK is parked on it purely so ACLK does not point at a disabled
-  crystal oscillator.
-- **LPM0** — low-power mode 0: CPU stopped, peripheral clocks running.
+- **VLO** — the MSP430's very-low-frequency internal oscillator, ~9.4 kHz and
+  very inaccurate. ACLK is parked on it purely so ACLK does not point at a
+  disabled crystal oscillator.
 - **LSB** — least significant bit; also the voltage of one code step.
 - **MISO / MOSI (SOMI / SIMO)** — SPI data lines: master-in-slave-out and
   master-out-slave-in (TI names the same lines slave-out-master-in etc.).
@@ -1451,9 +1481,7 @@ keys are defined in [Reference documents](#reference-documents).
 | 5 | Device comparison | eUSCI_B0 does SPI/I²C; TA0 is the Timer_A instance used | [§9.1](#91-the-msp430fr5969-in-one-paragraph) |
 | 12–15 | Table 4-1, Signal Descriptions | MSP430 names for the SPI lines (UCB0CLK/SIMO/SOMI) and PJ.4/PJ.5 = LFXIN/LFXOUT | [§6](#6-what-spi-is) |
 | 17–18 | §5.4 active-mode supply current, wait-state tables | 0 wait states only to 8 MHz — 16 MHz MCLK needs `NWAITSx = 1` | [§9.2](#92-clock-tree) |
-| 19 | §5.6 Low-Power Mode (LPM0, LPM1) Supply Currents | What LPM0 costs between ticks | [§12](#12-timing-the-100-hz-tick) |
-| 29 | DCO frequency ranges | The calibrated DCO settings behind 16 MHz MCLK / 8 MHz SMCLK | [§9.2](#92-clock-tree) |
-| 31 | Wake-up timing | LPM0 → active wake-up is sub-microsecond, so the tick's ~2 µs latency is real | [§12](#12-timing-the-100-hz-tick) |
+| 29 | DCO frequency ranges | The calibrated DCO settings behind the 16 MHz MCLK = SMCLK | [§9.2](#92-clock-tree) |
 | 38–39 | Tables 5-18, 5-19, eUSCI SPI master mode | Supported SPI master clock frequencies and setup/valid times — comfortably met at the 0.5 MHz SCLK this design uses | [§2](#2-key-design-decisions), [§6](#6-what-spi-is), [§9.2](#92-clock-tree) |
 | 63 | Port I/O after BOR | Ports must be configured before `LOCKLPM5` is cleared | [§9.3](#93-pin-map) |
 | 86, 88, 89, 90, 94, 101, 103, 106 | Tables 6-49 … 6-60, port pin functions | `PxSEL1`/`PxSEL0` encodings for every pin this design uses | [§9.3](#93-pin-map) |

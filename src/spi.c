@@ -65,13 +65,13 @@ void spi_init(void)
      *   UCMST        master mode (we generate SCLK)
      *   UCSYNC       synchronous mode (SPI rather than I2C/UART)
      *   UCMSB        MSB-first bit order (the ADC shifts MSB first)
-     *   UCSSEL__SMCLK bit-clock source = SMCLK (8 MHz, divided below)
+     *   UCSSEL__SMCLK bit-clock source = SMCLK (16 MHz, divided below)
      *   UCCKPH=0, UCCKPL=0 (not set) -> CPOL=0/CPHA=1 as explained above.
      *   UCMODE_0 (not set) -> 3-pin SPI: no STE line, ~CS is a plain GPIO. */
     UCB0CTLW0 |= UCMST | UCSYNC | UCMSB | UCSSEL__SMCLK;
 
-    /* Bit-rate divider: SCLK = SMCLK / UCB0BRW. ADC_SCLK_DIV is 16, so
-     * 8 MHz / 16 = 0.5 MHz (period 2 us) — the bottom end of the ADC's
+    /* Bit-rate divider: SCLK = SMCLK / UCB0BRW. ADC_SCLK_DIV is 32, so
+     * 16 MHz / 32 = 0.5 MHz (period 2 us) — the bottom end of the ADC's
      * 0.5..20 MHz half-clock window (SBASAW9 §6.3.1.4). Running at the slow
      * end maximises setup/hold margin on the jumper wires to the EVM; the
      * cost is bus time, ~150 us per tick, still far inside the 10 ms budget.

@@ -128,10 +128,12 @@ comes from the ADC's internal reference via the REFCM register, in firmware.
 
 ### Timebase
 
-Nothing to wire, and **no crystal is used**. Every clock comes from the MCU's
-internal DCO: MCLK (CPU) 16 MHz, SMCLK 8 MHz, and Timer_A0 from SMCLK/8 = 1 MHz
-with a period of 10000 → an exact **100.000 Hz** sample tick, accurate to the
-DCO's ~±2 %. That is all the tick needs to be: it spaces the ADC bursts evenly
+Nothing to wire, and **no crystal is used**. There are two timings in the
+design — a **16 MHz** system clock and a **0.5 MHz** ADC bus clock — and both
+come from the MCU's internal DCO: MCLK (CPU) and SMCLK (peripherals) both run
+undivided at 16 MHz, eUSCI_B0 divides SMCLK by 32 for the 0.5 MHz SPI bit
+clock, and Timer_A0 runs from SMCLK/8 = 2 MHz with a period of 20000 → an exact
+**100.000 Hz** sample tick, accurate to the DCO's ~±2 %. That is all the tick needs to be: it spaces the ADC bursts evenly
 and nothing measures absolute time from it.
 
 LFXT and HFXT are both held off, so PJ.4/PJ.5 (LFXIN/LFXOUT) stay plain GPIO
@@ -234,5 +236,5 @@ SCLK already runs at 0.5 MHz — the slowest rate the ADC accepts in half-clock
 mode, which is the maximum margin available against risk A in the plan. If
 frames still come back shifted/corrupt, the cause is not clock speed: check the
 strobe wiring and the M0 strap. To trade that margin back for speed, raise the
-rate in [src/board.h](src/board.h): `ADC_SCLK_DIV` 8 → 1 MHz, 4 → 2 MHz,
-1 → 8 MHz.
+rate in [src/board.h](src/board.h): `ADC_SCLK_DIV` 16 → 1 MHz, 8 → 2 MHz,
+2 → 8 MHz.

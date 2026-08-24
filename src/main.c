@@ -48,8 +48,13 @@
  *  Control flow:
  *    1. Hardware init (watchdog off, clocks, SPI, ADC configuration).
  *    2. Start the tick timer.
- *    3. Loop forever: sleep in LPM0 -> timer interrupt wakes us -> do this
- *       tick's work for the current phase -> update LEDs -> back to sleep.
+ *    3. Loop forever: spin on the tick flag -> timer interrupt sets it -> do
+ *       this tick's work for the current phase -> update LEDs -> spin again.
+ *
+ *  The CPU runs continuously at 16 MHz and is never put to sleep: the wait
+ *  between ticks is a plain busy-wait on the flag the timer ISR raises. The
+ *  only two rates in the design are that 16 MHz system clock and the 0.5 MHz
+ *  ADC bus clock.
  *
  *  The 100 Hz tick runs in BOTH phases; only what a tick does changes. That
  *  keeps one timebase for everything: the sample rate, the 1 s idle period
@@ -57,8 +62,8 @@
  *
  *  Timing budget per 10 ms tick: ~150 us of ADC bus traffic while streaming
  *  at the 0.5 MHz SCLK — three 24-clock bursts (~100 us once a second while
- *  idle, two bursts) — plus a few us of bookkeeping. The CPU is awake under
- *  2 % of the time while streaming and essentially never while idle.
+ *  idle, two bursts) — plus a few us of bookkeeping. That is under 2 % of the
+ *  tick; the remaining ~98 % is spent spinning on the tick flag.
  * =============================================================================
  */
 
@@ -79,7 +84,8 @@ static volatile uint16_t g_err_cfg;     /* probes whose readback was wrong    */
 static volatile uint8_t g_phase;        /* PHASE_IDLE / PHASE_STREAM          */
 
 /* Set by the timer ISR, consumed by main(). `volatile` because it is written
- * in interrupt context and read in a loop the compiler would otherwise hoist. */
+ * in interrupt context and read in a busy-wait loop the compiler would
+ * otherwise hoist out and spin on forever. */
 static volatile bool g_tick_pending;
 
 /* ---- run phases ---------------------------------------------------------
@@ -94,9 +100,10 @@ static volatile bool g_tick_pending;
  * the tick where a press becomes CONFIRMED - the pin has read low for
  * BTN_DEBOUNCE_POLLS consecutive polls, i.e. through the contact bounce.
  *
- * Polling beats a port interrupt here: the CPU is already awake every 10 ms,
- * so the poll is free, and the tick spacing IS the debounce - no extra timer,
- * no ISR that could fire mid-bounce a dozen times.
+ * Polling beats a port interrupt here: the CPU is running anyway and already
+ * visits this code every 10 ms, so the poll is free, and the tick spacing IS
+ * the debounce - no extra timer, no ISR that could fire mid-bounce a dozen
+ * times.
  *
  * The counter saturates rather than wrapping, so holding a button down keeps
  * returning true; that is harmless because the only caller leaves the idle
@@ -124,11 +131,11 @@ static void timer_init(void)
      * (CCR0 + 1) timer clocks — hence the "- 1" on the constant.
      *
      * With no crystal on the board the timebase is SMCLK, i.e. the DCO:
-     *   TASSEL__SMCLK  source = SMCLK (8 MHz)
-     *   ID__8          input divider /8 -> 1 MHz timer clock
+     *   TASSEL__SMCLK  source = SMCLK (16 MHz)
+     *   ID__8          input divider /8 -> 2 MHz timer clock
      *   MC__UP         up mode
      *   TACLR          clear the counter/divider state on start
-     * 1 MHz / 10000 = exactly 100.000 Hz, to DCO accuracy (~+-2 %). The tick
+     * 2 MHz / 20000 = exactly 100.000 Hz, to DCO accuracy (~+-2 %). The tick
      * only has to space the ADC bursts evenly — nothing measures absolute
      * time from it — so DCO accuracy is ample. */
     TA0CCR0 = TICK_PERIOD_SMCLK - 1u;
@@ -136,18 +143,14 @@ static void timer_init(void)
     TA0CTL = TASSEL__SMCLK | ID__8 | MC__UP | TACLR;
 }
 
-/* Timer_A0 CCR0 interrupt: fires once per sample period. It does the
- * absolute minimum — raise a flag and make sure the CPU wakes up — so all
- * the real work runs at normal priority in main() with interrupts enabled.
- *
- * __bic_SR_register_on_exit() clears the low-power-mode bits in the STATUS
- * REGISTER copy that was pushed on the stack when the interrupt was taken,
- * so when the ISR returns the CPU comes back running instead of going back
- * to sleep. */
+/* Timer_A0 CCR0 interrupt: fires once per sample period. It does the absolute
+ * minimum — raise a flag — so all the real work runs at normal priority in
+ * main() with interrupts enabled. The CPU is already running (it is spinning
+ * on that flag in main()), so there is no mode to leave on the way out: the
+ * ISR simply returns and the next pass of the wait loop sees the flag. */
 void __attribute__((interrupt(TIMER0_A0_VECTOR))) ta0_ccr0_isr(void)
 {
     g_tick_pending = true;
-    __bic_SR_register_on_exit(LPM0_bits);
 }
 
 /* ---- main --------------------------------------------------------------- */
@@ -165,7 +168,7 @@ int main(void)
      * is the "stop counting" bit. */
     WDTCTL = WDTPW | WDTHOLD;
 
-    clock_init();                   /* GPIO map, LPM5 unlock, DCO 16/8 MHz   */
+    clock_init();                   /* GPIO map, I/O latch, DCO 16 MHz       */
     g_status = 0u;                  /* no crystal to fail -> nothing to flag */
     spi_init();                     /* 0.5 MHz CPOL0/CPHA1 master            */
     __enable_interrupt();           /* set GIE                               */
@@ -192,22 +195,19 @@ int main(void)
     timer_init();                   /* start the 100 Hz tick */
 
     for (;;) {
-        /* Sleep until the tick ISR sets the flag. The disable/test/sleep
-         * sequence avoids the classic race where the interrupt fires between
-         * "test flag" and "go to sleep" and we then sleep through a tick:
-         * __bis_SR_register(LPM0_bits | GIE) atomically re-enables interrupts
-         * AND enters low-power mode 0 in one instruction.
+        /* Busy-wait for the tick. The CPU stays running at 16 MHz with
+         * interrupts enabled; the timer ISR raises g_tick_pending and this
+         * loop falls through on its next pass. g_tick_pending is `volatile`,
+         * so the compiler must re-read it every time round rather than
+         * hoisting the test out of the loop.
          *
-         * LPM0 rather than the deeper LPM3 because LPM3 stops SMCLK — which
-         * is exactly what clocks the tick timer, so LPM3 would leave the
-         * firmware asleep forever. */
-        __disable_interrupt();
+         * Clearing the flag is a single byte write and cannot tear, and a
+         * tick that arrives while the work below is running simply leaves the
+         * flag set, so the next pass through here does not wait — no
+         * interrupt-disable window is needed anywhere. */
         while (!g_tick_pending) {
-            __bis_SR_register(LPM0_bits | GIE);
-            __disable_interrupt();
         }
         g_tick_pending = false;
-        __enable_interrupt();
 
         /* ---- idle phase: probe the CONFIG register, watch the buttons ----
          * Everything here runs at the same 100 Hz tick as streaming; the
@@ -226,7 +226,7 @@ int main(void)
             }
 
             if (++idle_ticks < IDLE_CONFIG_TICKS) {
-                continue;               /* not a probe tick - back to sleep */
+                continue;               /* not a probe tick - wait for the next */
             }
             idle_ticks = 0;
 

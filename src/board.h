@@ -31,11 +31,13 @@
  *                                                       manual channel select,
  *                                                       data on SDOA only)
  *
- *  MCU clock tree (set up in clocks.c):
- *    MCLK  = 16 MHz  (DCO)         - CPU clock
- *    SMCLK =  8 MHz  (DCO / 2)     - feeds the eUSCI SPI bit clock AND the
- *                                    100 Hz sample-tick timer (via /8 = 1 MHz)
- *    ACLK  = ~9.4 kHz (VLO)        - parked on the internal low-power
+ *  MCU clock tree (set up in clocks.c). There are exactly two timings in this
+ *  design - a 16 MHz system clock and a 0.5 MHz ADC bus clock:
+ *    MCLK  = 16 MHz  (DCO)         - CPU clock, running continuously
+ *    SMCLK = 16 MHz  (DCO, /1)     - feeds the eUSCI SPI bit clock (/32 =
+ *                                    0.5 MHz) AND the 100 Hz sample-tick
+ *                                    timer (via /8 = 2 MHz)
+ *    ACLK  = ~9.4 kHz (VLO)        - parked on the internal very-low-frequency
  *                                    oscillator; nothing is timed from it.
  *                                    No crystal is used: LFXT and HFXT are
  *                                    both held off, so PJ.4/PJ.5 stay plain
@@ -55,13 +57,13 @@
 /* ---- tunables ---------------------------------------------------------- */
 
 /* eUSCI_B0 bit-clock divider: SPI SCLK = SMCLK / ADC_SCLK_DIV.
- * 16 -> 8 MHz / 16 = 0.5 MHz, the bottom of the ADC's 0.5..20 MHz half-clock
- * window and the rate this build runs at. The slow clock buys margin against
- * risk A in docs/PLAN.md (the CONVST/RD strobe-width spec is written against
- * a free-running clock) and against long jumper wires, at the cost of a
- * longer bus burst per tick (~135 us, still ~1.4 % of the 10 ms tick).
- * Faster is a one-line change: 8 -> 1 MHz, 4 -> 2 MHz, 1 -> 8 MHz. */
-#define ADC_SCLK_DIV        16u
+ * 32 -> 16 MHz / 32 = 0.5 MHz, the bottom of the ADC's 0.5..20 MHz half-clock
+ * window and the second of this design's two timings. The slow clock buys
+ * margin against risk A in docs/PLAN.md (the CONVST/RD strobe-width spec is
+ * written against a free-running clock) and against long jumper wires, at the
+ * cost of a longer bus burst per tick (~135 us, still ~1.4 % of the 10 ms
+ * tick). Faster is a one-line change: 16 -> 1 MHz, 8 -> 2 MHz, 2 -> 8 MHz. */
+#define ADC_SCLK_DIV        32u
 
 /* Which channel pair the ADC converts, 0..3.
  *
@@ -79,11 +81,11 @@
 #error "ADC_PAIR must be 0..3 (pair k = CHAk + CHBk)"
 #endif
 
-/* Sample-tick period in timer clocks. Timer_A0 runs from SMCLK/8 = 1 MHz, and
- * 1 MHz / 10000 = exactly 100.000 Hz - as accurate as the internal DCO, which
+/* Sample-tick period in timer clocks. Timer_A0 runs from SMCLK/8 = 2 MHz, and
+ * 2 MHz / 20000 = exactly 100.000 Hz - as accurate as the internal DCO, which
  * is roughly +-2 %. The tick only has to be regular enough to space the ADC
  * bursts evenly; nothing downstream measures absolute time from it. */
-#define TICK_PERIOD_SMCLK   10000u
+#define TICK_PERIOD_SMCLK   20000u
 
 /* Idle-phase period, in sample ticks: how often the firmware rewrites and
  * reads back the ADC CONFIG register while it waits for a button press.
