@@ -7,8 +7,7 @@ running system.
 
 Read **Part I** alone if you only want the overview. Read **Part II** if you
 have never worked with an ADC or SPI before — everything after it assumes
-those ideas. For the phased build plan and risk register, see
-[PLAN.md](PLAN.md).
+those ideas.
 
 ## Reference documents
 
@@ -26,6 +25,12 @@ documents equals the printed page number:
 So *(ADC §6.3.1.4, p. 19)* means section 6.3.1.4 on page 19 of SBASAW9.
 [Section 18](#18-datasheet-cross-reference-index) collects every citation into
 one index, grouped by document.
+
+One non-document reference is cited the same way:
+[`workingADC.jpg`](workingADC.jpg) is a logic-analyzer capture of the EVM's
+own **PHI controller board** driving this ADC — the manufacturer's working
+implementation of the same bus, and the empirical check on strobe shape in
+[§8.1](#81-placing-a-strobe-on-the-clock).
 
 Note that **register-level MSP430 programming detail is not in the MCU data
 sheet** — bits such as `UCB0CTLW0`, `CSCTL4`, `FRCTL0` and `LOCKLPM5` are
@@ -48,6 +53,7 @@ Contents:
 6. [What SPI is](#6-what-spi-is)
 7. [Why this ADC is not a "normal" SPI device](#7-why-this-adc-is-not-a-normal-spi-device)
 8. [The trick that makes SPI work anyway: the gated clock](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)
+   - [8.1 Placing a strobe on the clock](#81-placing-a-strobe-on-the-clock)
 
 **Part III — The implementation**
 
@@ -143,9 +149,9 @@ flowchart LR
 
 | Decision | Choice | Why |
 |---|---|---|
-| ADC interface | eUSCI_B0 SPI at **0.5 MHz** for CLOCK/SDI/SDOA + three GPIO strobes | The ADC's clock doubles as its conversion clock and the datasheet permits a gated ("burst") clock — which is exactly what an SPI master produces ([§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)). Half-clock mode accepts 0.5–20 MHz *(ADC §6.3.1.4, p. 19)*, and this build sits at the bottom of that range: SMCLK 16 MHz ÷ `ADC_SCLK_DIV` 32. The slow clock is deliberate — 2 µs per bit is enormous setup/hold margin for jumper-wired signals, and it makes the ~190 ns CONVST/RD strobes shorter than one CLOCK period outright, satisfying the datasheet's pulse-width rule literally rather than only via the gated-clock argument (risk A in PLAN.md). One conversion still costs only ~135 µs out of a 10 ms tick, so nothing is given up. |
+| ADC interface | eUSCI_B0 SPI at **0.5 MHz** for CLOCK/SDI/SDOA + three GPIO strobes | The ADC's clock doubles as its conversion clock and the datasheet permits a gated ("burst") clock — which is exactly what an SPI master produces ([§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock)). Half-clock mode accepts 0.5–20 MHz *(ADC §6.3.1.4, p. 19)*, and this build sits at the bottom of that range: SMCLK 16 MHz ÷ `ADC_SCLK_DIV` 32. The slow clock is deliberate — 2 µs per bit is enormous setup/hold margin for jumper-wired signals, and it is also what lets the CPU place the CONVST/RD strobes against individual clock edges: a half period is 1 µs against a ~0.5 µs polling loop ([§8.1](#81-placing-a-strobe-on-the-clock)). One conversion still costs only ~150 µs out of a 10 ms tick, so nothing is given up. |
 | ADC operating mode | **Plain Mode II** (M0 strapped low), special read **off** (SR=0), pseudo-differential (PDE=1) | Mode II = M0 0, M1 1: manual channel select, SDOA only *(ADC Table 6-5, p. 21)* — M1 high is also what deactivates SDOB, so SDOA is the one serial output. With SR=0 a read access returns one 20-bit frame *(ADC §6.5.2.2, p. 26)*, so the pair's two results take two read accesses (RD + 24 clocks each) instead of one 40-clock burst. It costs one extra strobe and 8 clocks a tick; in exchange every access on the bus has the same shape — RD plus three bytes — whether it carries a register value or half a conversion, and the frame decoder is one routine rather than two. The internal 2.5 V reference is routed as common mode by software, so the EVM needs no jumper changes. |
-| Strobe/clock alignment | Every access is one `spi_burst()` — a contiguous train of clocks, with `spi_wait_ready()` called *before* the strobe that opens it | The ADC captures RD on a CLOCK falling edge and starts a conversion on the first rising edge after CONVST, so it cares where the strobes sit relative to the clock. A byte-at-a-time routine that waits for `UCRXIFG` before returning empties the shift register at every byte boundary and puts an open-ended poll between the strobe and the first edge. Reloading `UCB0TXBUF` on `UCTXIFG` instead — while the previous byte is still shifting — keeps the clock unbroken, and moving the wait ahead of the strobe makes the strobe→clock gap a fixed handful of cycles ([§6](#6-what-spi-is)). |
+| Strobe/clock alignment | Every access is one contiguous train of clocks, and the strobe that opens it **straddles that train's first clock**: `spi_burst_strobe()` raises CONVST/RD a few hundred ns before the first rising CLOCK edge and releases it on the **second** rising edge of the same burst | The ADC samples RD and CONVST *at* the first rising CLOCK edge of the access they open and wants them back low about one clock later *(ADC §5.6 t1/t2/t3, p. 9; Figure 5-1, p. 10; §6.5.2.2, p. 26)* — a narrow pulse that has already fallen before the burst begins is one the part never sees at that edge. The release is timed by watching the SCLK pin itself through `P2IN`, not by counting cycles, so it needs no assumption about the eUSCI's start-up delay; the window runs with interrupts masked so the tick ISR cannot make it miss an edge. The burst stays unbroken because `UCB0TXBUF` is reloaded on `UCTXIFG`, while the previous byte is still shifting. Full mechanism, numbers and the one spec deviation: [§8.1](#81-placing-a-strobe-on-the-clock). |
 | Input mux | Pseudo-differential **4:1** configuration (`PDE=1`, ADC Table 6-2, p. 17), channel picked by CONFIG `C[1:0]` | Gives four single-ended inputs per converter measured against a common mode, which is what this application wants. `M0 = 0` keeps selection *manual* through `C[1:0]`; the SEQFIFO sequencer applies only to automatic mode (`M0 = 1`) *(ADC §6.3.2.1, p. 21)* and is left at its reset default. |
 | Channel selection | Fixed pair, `ADC_PAIR = 1` → `C = 01` → CHA1 + CHB1, set in the init CONFIG word and re-asserted on every access | Picking two channels that share a mux position makes them simultaneous by construction and removes the pipelined channel-rotation entirely ([§11](#11-reading-two-channels-why-a-pair)): the C field is a constant, so a corrupted command can only mis-select for one sample before the next access corrects it. |
 | Start of acquisition | Two phases: an idle phase that writes + reads back CONFIG once a second, and a streaming phase entered by pressing S1 or S2 — one way, until reset | Bring-up and measurement want opposite things. Idle proves the digital link at a watchable rate while the analog side is still being wired, probed or powered; streaming is the measurement. Making the transition an explicit press means the ADC never converts into a half-built setup, and the two phases have unmistakably different scope and LED signatures ([§4](#4-runtime-behaviour), [§14](#14-getting-at-the-data-the-scope)). One way because there is no use case for stopping mid-measurement, and a second press during streaming would be a way to lose samples by accident. |
@@ -163,7 +169,8 @@ src/
 ├── board.h        pin map, tunables (channel pair, SCLK divider, tick
 │                 period), pin macros
 ├── clocks.c/.h    GPIO setup, I/O latch release, FRAM wait state, DCO clocks
-├── spi.c/.h       eUSCI_B0 SPI master, blocking byte exchange
+├── spi.c/.h       eUSCI_B0 SPI master: contiguous bursts, and the
+│                 CONVST/RD strobe placed against their clock edges
 ├── adc168m102.c/.h ADC driver: init sequence, conversion + readout
 └── main.c         phase state machine, tick timer, button poll,
                    sample loop, LEDs, observable globals
@@ -176,7 +183,7 @@ flowchart TD
     main["main.c<br/>phase state machine, tick timer,<br/>button poll, sample loop,<br/>LEDs, observable globals"]
     clocks["clocks.c/.h<br/>GPIO, I/O latch release,<br/>FRAM wait state, DCO clocks"]
     adc["adc168m102.c/.h<br/>init sequence,<br/>conversion + readout"]
-    spi["spi.c/.h<br/>eUSCI_B0 SPI master,<br/>blocking byte exchange"]
+    spi["spi.c/.h<br/>eUSCI_B0 SPI master:<br/>contiguous bursts + strobe<br/>placement on clock edges"]
     board["board.h<br/>pin map + tunables<br/>+ msp430.h device header"]
 
     main --> clocks
@@ -221,17 +228,18 @@ flowchart TD
 
 Both phases run off the same 100 Hz tick; only what a tick *does* changes.
 While idle the scope sees two 24-clock register accesses once a second and a
-dead bus in between; after the button press it sees one ~135 µs acquisition
+dead bus in between; after the button press it sees one ~150 µs acquisition
 burst per tick, 10 ms apart.
 
 The hand-over tick is the only unusual one: it writes the operating CONFIG and
 burns two throw-away conversions (~350 µs, still well inside the 10 ms budget)
 before the first real sample lands on the *next* tick. That step is mandatory,
-not cosmetic — the idle probe leaves `SR = 0` in CONFIG, so without the rewrite
-the first readouts would arrive in the wrong framing and fail the frame check
+not cosmetic — the idle probe leaves `C = 00` in CONFIG, so without the rewrite
+the first conversions would digitize pair 0 instead of `ADC_PAIR`: the right
+framing, the wrong channels
 ([§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming)).
 
-Per-tick budget: ~135 µs on the ADC bus plus a few µs of bookkeeping while
+Per-tick budget: ~150 µs on the ADC bus plus a few µs of bookkeeping while
 streaming (~100 µs once a second while idle); the rest of the tick the CPU
 spins on the tick flag. Useful work is under 2 % of the tick while streaming
 and negligible while idle — the CPU itself never stops running.
@@ -394,10 +402,11 @@ already waiting when the current one ends, so the clock runs straight through
 the byte boundary. Reloading only after `UCRXIFG` ("the byte has finished")
 instead leaves the shift register empty for the length of a CPU round trip,
 which shows up on a scope as a stall of roughly a bit time at every byte
-boundary. `spi_burst()` does the former. The same round trip, sitting between
-a strobe and the first clock edge, is why `spi_wait_ready()` is called
-*before* RD and CONVST rather than letting the burst do the waiting after
-them — see [§10.3](#103-one-conversion--readout-adc168_read).
+boundary. `spi_burst()` does the former. That same round trip is why
+`spi_wait_ready()` is called *before* an access begins rather than inside it:
+once a strobe is up the timing is measured in clock edges, and nothing may
+block. Where the strobe then sits relative to those edges is
+[§8.1](#81-placing-a-strobe-on-the-clock).
 
 A 0.5 MHz clock means each bit takes 2 µs, a byte 16 µs. That is the slowest
 the ADC allows — it accepts 0.5–20 MHz in half-clock mode *(ADC §6.3.1.4,
@@ -410,8 +419,10 @@ p. 39)* and against the stray capacitance of jumper wires.
 ## 7. Why this ADC is not a "normal" SPI device
 
 A typical SPI sensor has a tidy protocol: pull ~CS low, send a command
-byte, read back some bytes, release ~CS. This ADC is different in three
-ways, and the whole driver design follows from them:
+byte, read back some bytes, release ~CS. This driver keeps that outer
+frame — every access asserts ~CS for itself and releases it again — but the
+inside of the frame is different in three ways, and the whole driver design
+follows from them:
 
 1. **CLOCK is also the conversion clock.** The SAR needs ~18 clock pulses
    to finish converting. Those pulses come from *our* SCLK. So we must send
@@ -421,12 +432,16 @@ ways, and the whole driver design follows from them:
 2. **Two extra control strobes.** Besides ~CS there are:
    - **CONVST** — a rising edge freezes the sample-and-holds and arms a
      conversion, which starts on the *next* CLOCK rising edge (setup time
-     12 ns minimum) *(ADC §6.3.1.1, p. 18)*.
-   - **RD** — a falling edge tells the ADC "start shifting your result out
+     t1 = 12 ns minimum) *(ADC §6.3.1.1, p. 18; §5.6, p. 9)*.
+   - **RD** — a rising edge tells the ADC "start shifting your result out
      on SDOA now", and it *also* opens a 16-clock window in which the ADC
      listens on SDI for a command word *(ADC §6.5.1, p. 24)*.
-   These are ordinary GPIO pins on the MSP430 that we pulse under software
-   control.
+
+   Both are ordinary GPIO pins on the MSP430, and both are *level*-relevant
+   at the first clock of the access they open: they go up just before it and
+   come back down about one clock period later
+   *(ADC Figure 5-1, p. 10; t2/t3 in §5.6, p. 9)*. Placing them is
+   [§8.1](#81-placing-a-strobe-on-the-clock).
 
 3. **A status output.** **BUSY** goes high while the inputs are in hold mode
    and returns low when the conversion completes *(ADC Table 4-1, p. 3)*.
@@ -451,11 +466,16 @@ So the design is:
 
 - **Need N clock pulses?** Transfer N/8 bytes. The bytes' contents may or
   may not matter, but the *pulses* always do.
-- **Between bursts** the clock is idle-low, and it is in these quiet gaps
-  that we pulse CONVST and RD from GPIO. That guarantees a strobe never
-  coincides with a clock edge — which is what the datasheet's "make sure the
-  RD signal in this mode is not longer than one clock cycle" rule
-  *(ADC §6.5.2.3, p. 27)* is really protecting against.
+- **Between bursts** the clock is idle-low, and that quiet is what makes the
+  strobes *placeable*: the firmware decides exactly where the first clock
+  edge of an access falls, so it can put CONVST and RD in a fixed
+  relationship to it. What that relationship is — up before the first rising
+  edge, down on the second — is
+  [§8.1](#81-placing-a-strobe-on-the-clock). The rule being satisfied is not
+  "never overlap an edge" (the part *wants* the strobe high at the first
+  edge) but the width limit: "make sure the CONVST and RD signals are not be
+  longer than one clock cycle" *(ADC §6.5.2.2, p. 26; the same sentence for
+  `SR = 1` in §6.5.2.3, p. 27)*.
 
 There are two subtle consequences the driver handles explicitly:
 
@@ -469,6 +489,85 @@ There are two subtle consequences the driver handles explicitly:
   After configuring, the driver performs **two throw-away conversions** so the
   streaming loop only ever sees settled framing (see the end of
   `adc168_init()`).
+
+### 8.1 Placing a strobe on the clock
+
+The datasheet is specific about where a strobe sits. In the half-clock timing
+diagram *(ADC Figure 5-1, p. 10)* CONVST and RD both
+
+- **rise before** the first rising CLOCK edge of the access they open — at
+  least t1 = 12 ns of setup *(ADC §5.6, p. 9)*;
+- are **still high at** that edge, which is where the part samples them; and
+- **fall within about one clock period** of it — the hatched trailing edge in
+  the figure, and the t2/t3 "high time, max 1 t_CLK" rows of the same table.
+
+So a strobe straddles the first clock of its burst; it is not a narrow pulse
+in the quiet gap ahead of it. A pulse that has already fallen when the first
+edge arrives is one the ADC never sees there.
+
+```
+   CLOCK   ______|‾|_|‾|_|‾|_|‾|_ ...   24 clocks, one contiguous burst
+   CONVST  ___|‾‾‾‾‾‾‾|_____________
+   or RD      ^       ^
+              |       +-- released on rising edge 2
+              +-- up before rising edge 1 (t1 setup), still high at it
+```
+
+`spi_burst_strobe()` in `spi.c` produces that shape, and it owns **both**
+edges of the strobe, because both are timed against a clock it is about to
+start:
+
+1. The caller — `rd_access()`, or the conversion step of `adc168_read()` —
+   calls `spi_wait_ready()` first, so the shift register is drained, SCLK is
+   parked at idle low and `UCB0TXBUF` will accept a byte without blocking.
+   All waiting happens here, before anything is timed.
+2. Interrupts are masked. The whole window is ~2.5 µs and the only thing it
+   can delay is the 100 Hz tick flag; a tick ISR landing inside it, on the
+   other hand, would let a clock edge slip past unseen and release the strobe
+   a full clock late.
+3. The strobe goes high, and **one instruction later** (~250 ns at 16 MHz,
+   plus the eUSCI's own start-up) the first byte is written to `UCB0TXBUF` —
+   which is what sets SCLK running. That gap is t1, with orders of magnitude
+   to spare over its 12 ns minimum.
+4. The CPU then watches SCLK *itself*. P2.2 is muxed to UCB0CLK, but `PxIN`
+   reflects the physical pin whatever function drives it, so polling `P2IN`
+   bit 2 sees the real edges: high, low, high — rising edge 1, falling edge
+   1, rising edge 2 — and on that last transition the strobe is cleared.
+5. The rest of the burst runs normally, reloading `UCB0TXBUF` on `UCTXIFG`
+   so the 24 clocks stay unbroken. The two clocks spent polling sit inside
+   the first byte's 16 µs, so the second byte is still queued long before the
+   shift register empties.
+
+Watching the pin beats counting cycles: nothing in step 4 assumes how long
+the eUSCI takes to produce its first edge after the buffer write, and the
+same code follows the clock unchanged if `ADC_SCLK_DIV` moves.
+
+**What it costs.** The poll loop is a bit test, a branch and a guard
+decrement — about 8 cycles, 0.5 µs at 16 MHz MCLK — so the release lands
+between roughly 0.25 µs and 0.8 µs after the second rising edge, inside that
+clock's high phase. That granularity also puts a floor under the bus speed:
+the loop must be short compared with a half period (1 µs at 0.5 MHz), so
+`spi.c` carries an `#error` below `ADC_SCLK_DIV = 32`. Going faster means
+driving the release from a Timer_A capture/compare output instead of from the
+CPU — the strobe pins would have to move to timer-capable ones — which is a
+real change, not a one-line divider edit.
+
+**One honest deviation.** Total high time comes out at roughly 1.2–1.5 t_CLK:
+the lead, one full clock period, and the release granularity. t2 and t3 cap
+it at 1 t_CLK *(ADC §5.6, p. 9)*, and §6.5.2.2 says it plainly — "make sure
+the CONVST and RD signals are not be longer than one clock cycle to provide
+proper functionality and avoid output data corruption" *(ADC p. 26)*. From
+software, at this clock rate, it cannot be squeezed under that cap. The
+evidence that it is tolerable is the reference hardware: the PHI controller
+board that ships with the EVM, captured in
+[`workingADC.jpg`](workingADC.jpg) driving this same part, holds CONVST high
+for about 1.5–2 clock periods with the fall landing on the second rising edge
+— the same shape, slightly wider than ours.
+
+If bad frames ever do point back here, the fix is the timer-driven release
+above, not a narrower software pulse: shortening the strobe below one clock
+period puts its *falling* edge back before the edge the ADC samples it on,
+which is the arrangement this design has just moved away from.
 
 ---
 
@@ -553,7 +652,7 @@ each pin's `PxSEL1`/`PxSEL0` encodings.
 | P2.2 | eUSCI_B0 clock (SCLK) | CLOCK (7) | Table 6-52, p. 90 |
 | P1.6 | eUSCI_B0 SIMO (MOSI) | SDI (15) | Table 6-51, p. 89 |
 | P1.7 | eUSCI_B0 SOMI (MISO) | SDOA (1) | Table 6-51, p. 89 |
-| P1.4 | GPIO output | ~CS (9) — held low | Table 6-50, p. 88 |
+| P1.4 | GPIO output | ~CS (9) — asserted per access | Table 6-50, p. 88 |
 | P2.6 | GPIO output | CONVST (13) | Table 6-54, p. 94 |
 | P4.2 | GPIO output | RD (11) | Table 6-58, p. 101 |
 | P1.5 | GPIO input, pulldown | BUSY (5) | Table 6-50, p. 88 |
@@ -802,27 +901,29 @@ CONFIG word carrying the address, then the value — illustrated in
 ### 10.2 The initialization sequence (`adc168_init()`)
 
 ```
- 1. ~CS low                       enable the interface, stays low forever
- 2. write 0x0004                  soft reset (A=0100): everything to defaults
- 3. write 0x1041                  R=01, PDE=1, A=0001 -> "send CONFIG back"   \ adc168_
- 4. RD + read 3 bytes             the readback arrives; check bits 11:4 == 0x04 > config_
+ (~CS idles high; each step below is one self-contained access —
+  ~CS low, strobe + 24 clocks, ~CS high again)
+
+ 1. write 0x0004                  soft reset (A=0100): everything to defaults
+ 2. write 0x1041                  R=01, PDE=1, A=0001 -> "send CONFIG back"   \ adc168_
+ 3. RD-strobed burst, 3 bytes     the readback arrives; check bits 11:4 == 0x04 > config_
                                   (PDE=1, all else 0). Wrong -> ST_ADC_NOLINK. / cycle()
- 5. write 0x1042 then 0x03FF      REFDAC1 <- enable, 2.5 V
- 6. write 0x1045 then 0x03FF      REFDAC2 <- enable, 2.5 V
- 7. write 0x104C then 0xFF00      REFCM   <- all channels use REFIO1 as common mode
- 8. wait 10 ms                    reference capacitors settle (t_REFON = 8 ms)
- 9. write 0x5040                  R=01, SR=0, PDE=1, CID=0, C=01 (real config;  \ adc168_
+ 4. write 0x1042 then 0x03FF      REFDAC1 <- enable, 2.5 V
+ 5. write 0x1045 then 0x03FF      REFDAC2 <- enable, 2.5 V
+ 6. write 0x104C then 0xFF00      REFCM   <- all channels use REFIO1 as common mode
+ 7. wait 10 ms                    reference capacitors settle (t_REFON = 8 ms)
+ 8. write 0x5040                  R=01, SR=0, PDE=1, CID=0, C=01 (real config;  \ adc168_
                                   C = ADC_PAIR, so conversion 1 is pair 1)      > start_
-10. two throw-away conversions    flush the "one read access late" pipeline     / stream()
+ 9. two throw-away conversions    flush the "one read access late" pipeline     / stream()
 ```
 
-Steps 3–4 and steps 9–10 are the two reusable halves, and `main()` calls both
+Steps 2–3 and steps 8–9 are the two reusable halves, and `main()` calls both
 of them again at runtime: the probe once a second while idle, the arming pair
 once when a button is pressed ([§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming)).
 Note that the operating word is written *after* the reference registers, not
 before: the REFDAC/REFCM pointer words are themselves CONFIG writes carrying
 the same mode bits (`R=01`, `SR=0`, `PDE=1`) with `C=00`, so nothing converts
-while they are in flight and step 9 is what finally installs `C = ADC_PAIR`.
+while they are in flight and step 8 is what finally installs `C = ADC_PAIR`.
 Every word in the sequence carries the same mode bits — only `C` and the
 `A` action differ — which is what makes the probe an honest rehearsal of the
 framing streaming will use.
@@ -844,10 +945,10 @@ sequenceDiagram
     participant M as MSP430 (adc168_init)
     participant A as ADC168M102R
 
-    M->>A: ~CS low (stays low forever)
+    Note over M,A: ~CS idles high; every access below frames itself<br/>(~CS low → strobe + 24 clocks → ~CS high)
     M->>A: write 0x0004  — soft reset, A=0100
     M->>A: write 0x1041  — R=01, PDE=1, A=0001 "send CONFIG back"
-    M->>A: RD strobe + 3 bytes of clock
+    M->>A: RD high + 3 bytes of clock (RD released on clock 2)
     A-->>M: CONFIG readback
     alt bits 11:4 == 0x04
         Note over M: link OK
@@ -864,22 +965,22 @@ sequenceDiagram
     Note over M: init leaves the part armed;<br/>main() then idles in the probe phase<br/>until a button is pressed
 ```
 
-Step 4 is the **link check**: if MISO is dead (open wire, ADC unpowered,
+Step 3 is the **link check**: if MISO is dead (open wire, ADC unpowered,
 wrong strap) we read all-zeros or all-ones and the mode bits will not
 match — the firmware then sets `ST_ADC_NOLINK`, lights the error LED before
 the first tick, and parks the raw value in `g_cfg` for the debugger. Note
 that `g_cfg` is the *link-check* readback (expected `0x1041`), captured at
-step 4 — before the operating word of step 9 is written, so it does not
+step 3 — before the operating word of step 8 is written, so it does not
 carry the channel selection. Every idle-phase probe overwrites `g_cfg` with
 a fresh copy of the same readback, so it always reflects the most recent
 exchange rather than only the one at power-on.
 
-Steps 5–7 matter because the internal references are **off by default** —
+Steps 4–6 matter because the internal references are **off by default** —
 REFDAC1/REFDAC2 reset to `0x07FF`, which has the power-down bit set
 *(ADC Figures 7-4/7-5, p. 36)* — so without them the ADC would convert against
-nothing. Step 7 is what makes the pseudo-differential 4:1 configuration usable:
+nothing. Step 6 is what makes the pseudo-differential 4:1 configuration usable:
 the `CMxx` bits choose the *internal* reference over the external CMA/CMB pins,
-and the `Rxx` bits choose REFIO1 (the 2.5 V DAC from step 5) over REFIO2
+and the `Rxx` bits choose REFIO1 (the 2.5 V DAC from step 4) over REFIO2
 *(ADC Table 7-7, pp. 40–41; block diagram in §6.3.1, p. 20)*. Writing `0xFF00`
 arms all eight channels even though only two are read — it costs one word and
 keeps `ADC_PAIR` a one-line change. Doing it in firmware is also why the EVM's
@@ -901,36 +1002,55 @@ JP1/JP2 jumpers can stay in their default `CMx_EXT` position *(EVM §2.2, p. 5)*
 ### 10.3 One conversion + readout (`adc168_read()`)
 
 ```
-   CONVST  _|‾|_____________________________________________________
-   CLOCK   ____xxxxxxxxxxxx____xxxxxxxxxxxx____xxxxxxxxxxxx_________
+   ~CS     ‾|_____________|‾‾‾|___________|‾‾‾|___________|‾‾‾‾‾‾‾‾‾
+   CONVST  _|‾‾‾|___________________________________________________
+   CLOCK   ___xxxxxxxxxxxxx____xxxxxxxxxxxx____xxxxxxxxxxxx_________
                ^ 24 conv.        ^ 24 readout    ^ 24 readout
                  clocks            clocks (A)      clocks (B)
    BUSY    ___|‾‾‾‾‾‾‾‾|_____________________________________________
-   RD      ___________________|‾|__________|‾|_______________________
+   RD      __________________|‾‾‾|________|‾‾‾|_____________________
    SDOA    --------------------[ frame A ]--[ frame B ]--------------
    SDI     [pair cmd]----------[pair cmd]---[pair cmd]---------------
 ```
 
+Each strobe rises just before its burst and falls on that burst's **second**
+rising CLOCK edge — it straddles the first clock rather than sitting in the
+gap ahead of it ([§8.1](#81-placing-a-strobe-on-the-clock)).
+
+**~CS frames each burst individually.** It goes low just ahead of the strobe
+and back high once the burst's last CLOCK edge has passed, so all three
+accesses in a tick are self-contained and the bus returns to a fully idle
+state — CLOCK low, ~CS high, both strobes low — in between. The only timing
+the datasheet attaches to the line is t_D6 = 6 ns from the ~CS rising edge to
+SDOA tri-stating *(ADC §5.7, p. 10)*, so the single instruction between the
+last clock and the release is ample. This is what the PHI reference board
+does in `docs/workingADC.jpg`; an earlier revision of this firmware instead
+dropped ~CS once at init and left it low for the whole session, which the
+part also accepts but which makes the scope trace harder to read.
+
 1. **Check BUSY is low.** "Do not issue a rising CONVST edge during a
    conversion (that is, when BUSY is high)" *(ADC §6.3.1.1, p. 18)*.
-   Then `spi_wait_ready()`: the SPI must be idle *and* primed before the
-   strobe, so that what follows the strobe is a clock edge rather than a
-   poll.
-2. **Pulse CONVST** (two GPIO writes, ~190 ns, clock is idle).
-   Sample-and-holds freeze; the conversion starts on the next CLOCK rising
-   edge, for which CONVST needs 12 ns of setup *(ADC §6.3.1.1, p. 18)*.
-3. **Send 3 dummy bytes = 24 clocks.** Half-clock mode needs at least 20
-   CLOCKs for a complete conversion cycle *(ADC §6.3.2.2, p. 21)*; 24 leaves
-   margin. (We put the channel command in the first byte too — harmless if
-   ignored, correct if latched.)
+   Then `spi_wait_ready()` and `~CS` low: the SPI must be idle *and* primed
+   before ~CS and the strobe, so that once CONVST is up nothing can block
+   before the clock starts.
+2. **Raise CONVST and start the burst** — one call, `spi_burst_strobe()`,
+   because the two are timed together ([§8.1](#81-placing-a-strobe-on-the-clock)).
+   The sample-and-holds freeze on the rising edge; the conversion starts on
+   the first CLOCK rising edge, for which CONVST needs t1 = 12 ns of setup
+   *(ADC §6.3.1.1, p. 18)*; CONVST is released on the second rising edge.
+3. **The burst itself is 3 bytes = 24 clocks.** Half-clock mode needs at
+   least 20 CLOCKs for a complete conversion cycle *(ADC §6.3.2.2, p. 21)*;
+   24 leaves margin. (We put the channel command in the first byte too —
+   harmless if ignored, correct if latched.)
 4. **Wait for BUSY low** with a bounded loop — BUSY returns low when the
    conversion completes *(ADC Table 4-1, p. 3)*. It drops during the burst;
    the wait is a safety net that becomes an error if it times out.
-5. **Pulse RD, transfer 3 bytes = 24 clocks.** The falling edge starts frame
+5. **RD-strobed burst, 3 bytes = 24 clocks.** RD's rising edge starts frame
    A on SDOA and opens the 16-clock command window on SDI *(ADC §6.5.1,
-   p. 24)*. With `SR = 0` this read access carries converter A's result and
-   nothing else *(ADC §6.5.2.2, p. 26)*; MOSI carries the channel command.
-6. **Pulse RD again, transfer 3 more bytes.** The second read access brings
+   p. 24)*; it is released on the burst's second rising CLOCK edge, exactly
+   as CONVST was. With `SR = 0` this read access carries converter A's result
+   and nothing else *(ADC §6.5.2.2, p. 26)*; MOSI carries the channel command.
+6. **A second RD-strobed burst.** The second read access brings
    converter B's frame. That extra strobe is the entire price of plain Mode
    II — the alternative, `SR = 1`, would pack both frames into one 40-clock
    burst. Neither arrangement uses SDOB: M1 is pulled high, which leaves that
@@ -967,17 +1087,16 @@ sequenceDiagram
 
     M->>A: check BUSY is low
     Note right of M: never raise CONVST<br/>during a conversion
-    M->>A: pulse CONVST (~190 ns, clock idle)
-    Note right of A: sample-and-holds freeze,<br/>conversion armed
-    M->>A: 3 dummy bytes = 24 clocks<br/>(pair command in byte 0)
+    M->>A: CONVST high, then 3 bytes = 24 clocks<br/>(pair command in byte 0)
+    Note right of A: sample-and-holds freeze;<br/>conversion starts on clock 1;<br/>CONVST released on clock 2
     A->>A: SAR converts (~18 clocks), BUSY high
     A-->>M: BUSY falls
     alt BUSY still high after the bounded wait
         Note over M: g_err_busy++,<br/>both samples = -32768,<br/>error LED latched
     else BUSY low
-        M->>A: read access 1: pulse RD, 3 bytes = 24 clocks<br/>(MOSI carries the pair command)
+        M->>A: read access 1: RD high, 3 bytes = 24 clocks,<br/>RD released on clock 2<br/>(MOSI carries the pair command)
         A-->>M: frame A (CHA1) on SDOA
-        M->>A: read access 2: pulse RD, 3 bytes = 24 clocks
+        M->>A: read access 2: same shape again
         A-->>M: frame B (CHB1) on SDOA
         M->>M: reassemble both 16-bit results, check the<br/>fixed bits and each frame's A/B indicator
         alt fixed bits wrong
@@ -988,8 +1107,8 @@ sequenceDiagram
     end
 ```
 
-Total: ~64 clocks ≈ 128 µs of bus time at the 0.5 MHz CLOCK, plus a few µs of
-overhead — about 135 µs, and that is the entire ADC workload of a tick (1.4 %
+Total: 72 clocks ≈ 144 µs of bus time at the 0.5 MHz CLOCK, plus a few µs of
+overhead — about 150 µs, and that is the entire ADC workload of a tick (1.5 %
 of the 10 ms period).
 
 ### 10.4 The idle probe and the hand-over to streaming
@@ -1000,7 +1119,7 @@ as the init link check. Two driver entry points cover it:
 
 | Function | What it does on the bus | Leaves CONFIG as |
 |---|---|---|
-| `adc168_config_cycle()` | `write_word(0x1041)` then `read_word()` — RD pulse + 24 clocks, twice | `SR = 0`, `C = 00`, PDE=1 (the probe word) |
+| `adc168_config_cycle()` | `write_word(0x1041)` then `read_word()` — an RD-strobed 24-clock burst, twice | `SR = 0`, `C = 00`, PDE=1 (the probe word) |
 | `adc168_start_stream()` | `write_word(0x5040)`, then two complete conversion + readout cycles | `SR = 0`, `C = ADC_PAIR` (the operating word) |
 
 `adc168_config_cycle()` returns the raw readback; `adc168_config_ok()` applies
@@ -1034,7 +1153,7 @@ pick two channels:
 
 | Choice | Conversions per tick | Simultaneous? |
 |---|---|---|
-| Two channels on the **same** converter (e.g. CHA1 + CHA2) | 2 — one per mux position, with the other converter's result thrown away each time | No: ~135 µs apart |
+| Two channels on the **same** converter (e.g. CHA1 + CHA2) | 2 — one per mux position, with the other converter's result thrown away each time | No: ~150 µs apart |
 | Two channels forming a **pair** (CHA1 + CHB1) | 1 | Yes — one CONVST freezes both |
 
 ```mermaid
@@ -1044,7 +1163,7 @@ flowchart TD
     Q -->|"no: CHA1 + CHA2<br/>(same converter)"| TWO["tick = 2 conversions"]
     TWO --> T1["CONVST, read pair 1<br/>keep A, discard B"]
     T1 --> T2["CONVST, read pair 2<br/>keep A, discard B"]
-    T2 --> NOSIM["the 2 samples are ~135 µs apart<br/>and half of every conversion<br/>is thrown away"]
+    T2 --> NOSIM["the 2 samples are ~150 µs apart<br/>and half of every conversion<br/>is thrown away"]
 
     Q -->|"yes: CHA1 + CHB1<br/>(pair 1)"| ONE["tick = 1 conversion"]
     ONE --> O1["one CONVST freezes both S/H"]
@@ -1176,7 +1295,7 @@ sequenceDiagram
     Note over L: t ~ 2 µs — wait loop falls through
     L->>D: t ~ 2 µs — call adc168_read
     D->>B: CONVST / 24 clocks / BUSY / RD+24 / RD+24
-    Note over B: the whole burst the scope sees<br/>(~135 µs)
+    Note over B: the whole burst the scope sees<br/>(~150 µs)
     B-->>D: frame A + frame B
     D-->>L: t ~ 137 µs — two 16-bit results
     L->>G: publish g_sample_a, g_sample_b, g_tick
@@ -1237,7 +1356,7 @@ perturb the sample timing.
 probe the digital communication pins with an oscilloscope or logic analyzer"
 and to attach an external controller *(EVM §2.3 and Figure 2-4, p. 6)*.
 SDOA (EVM J5.1) is the data. CONVST (J5.13) is the
-trigger: it pulses once per tick, with ~10 ms of quiet either side, so a
+trigger: it goes high once per tick, with ~10 ms of quiet either side, so a
 rising-edge single-shot capture lands on a whole acquisition every time.
 CLOCK (J5.7) gives the analyzer its bit clock, and BUSY (J5.5) shows the
 conversion itself. Sample MISO on the CLOCK **falling** edge
@@ -1245,7 +1364,14 @@ conversion itself. Sample MISO on the CLOCK **falling** edge
 
 **What one tick looks like.** Three 24-clock bursts: one converts, then one
 read access per converter — the waveform in
-[§10.3](#103-one-conversion--readout-adc168_read). A logic analyzer with an
+[§10.3](#103-one-conversion--readout-adc168_read). ~CS (J5.9) is the easiest
+trace to count: it goes low three times per tick, once around each burst, and
+sits high in between. Put CONVST or RD on the
+same capture as CLOCK and check the strobe shape while you are there: each
+one should go high a few hundred ns *before* its burst's first rising clock
+edge, still be high at that edge, and fall on the second one, ~2 µs later
+([§8.1](#81-placing-a-strobe-on-the-clock)). A strobe that has already
+fallen before the clock starts is the old, wrong shape. A logic analyzer with an
 SPI decoder set to CPOL=0/CPHA=1, MSB first, will give you the two groups of
 three readout bytes directly;
 [§15](#15-number-formats-decoding-a-readout-burst-by-hand) turns them into
@@ -1253,7 +1379,8 @@ numbers.
 
 **Nothing on the bus? Press a button.** Out of reset the board is in the idle
 phase, and its signature is deliberately different: no CONVST edge at all,
-BUSY flat low, and two 24-clock register accesses about a second apart —
+BUSY flat low, and two 24-clock register accesses (two ~CS assertions) about
+a second apart —
 `0x10 0x41 0x00` going out on SDI, `0x04 0x10 0x40` coming back on SDOA. If
 that is what the scope shows, the firmware is healthy and simply waiting;
 press S1 (P4.5) or S2 (P1.1) and the trace switches to one acquisition burst
@@ -1356,7 +1483,7 @@ flowchart TD
     STATUS -->|0x02| S2["ADC link check failed.<br/>g_cfg holds the raw readback,<br/>expect 0x1041. Check J5 wiring,<br/>supplies, M0 strap<br/>(EVM Figure 2-4, p. 6)"]
     STATUS -->|0x00| S0{"which counter<br/>is climbing?"}
 
-    S0 -->|g_err_frame| FRAME["bit misalignment.<br/>SCLK is already 0.5 MHz, the ADC's<br/>minimum, so check strobe wiring,<br/>the M0 strap and SDOA continuity"]
+    S0 -->|g_err_frame| FRAME["bit misalignment.<br/>SCLK is already 0.5 MHz, the ADC's<br/>minimum, so check strobe wiring<br/>and shape (§8.1), the M0 strap<br/>and SDOA continuity"]
     S0 -->|g_err_busy| BUSY["conversion never completes:<br/>check CLOCK reaching the ADC<br/>and BUSY wiring"]
     S0 -->|g_err_cfg| CFG2["idle probes failed earlier;<br/>the LED is latched from then.<br/>Harmless if it stopped climbing"]
 
@@ -1369,12 +1496,12 @@ flowchart TD
 | Symptom | Likely cause | Firmware behaviour | What to do |
 |---|---|---|---|
 | Error LED on, `g_status = 0x02`, `g_cfg = 0x0000`/`0xFFFF` | SDOA/SDI/RD/~CS wiring, ADC unpowered, PHI board still attached | Keeps running; all frames will fail | Check J5 wiring *(EVM Figure 2-4, p. 6)*, DVDD 2.3–5.5 V / AVDD 2.7–5.5 V *(EVM Table 1-1, p. 3; supplied via TP3/TP2 with R19/R34 removed, EVM §2.1, p. 4)*, M0 strap, PHI removed |
-| `g_err_frame` climbing, SDOA looks shifted | Clock phase or strobe timing. Not bus speed: SCLK is already at 0.5 MHz, the ADC's minimum *(ADC §6.3.1.4, p. 19)*, so there is no slower setting to try | Bad frames rejected and counted | Check the CONVST/RD strobe wiring, the M0 strap and SDOA continuity; confirm CPOL/CPHA on a scope (risk A in PLAN.md) |
+| `g_err_frame` climbing, SDOA looks shifted | Clock phase or strobe placement. Not bus speed: SCLK is already at 0.5 MHz, the ADC's minimum *(ADC §6.3.1.4, p. 19)*, so there is no slower setting to try | Bad frames rejected and counted | Check the CONVST/RD strobe wiring, the M0 strap and SDOA continuity; confirm CPOL/CPHA on a scope. Then check the strobe shape against [§8.1](#81-placing-a-strobe-on-the-clock): high before rising edge 1, released on rising edge 2. If it is right and frames still misalign, the remaining suspect is the ~1.2–1.5 t_CLK high time against the t2/t3 cap — move the release to a timer output ([§8.1](#81-placing-a-strobe-on-the-clock)) |
 | Frame A and frame B swapped, or a signal in neither | Analog wiring | — | CHA1 is EVM **J2** pin 5, CHB1 is **J1** pin 5 (even pins GND) *(EVM Figure 2-3, p. 5)*; check `ADC_PAIR` matches the header pins used |
 | Both channels read ≈ −32768 or ≈ 0 with inputs applied | References not enabled / not settled | — | Check init ran (error LED off), 2.5 V on EVM REFIO test points (settling t_REFON = 8 ms with the EVM's 22 µF caps, *ADC §5.7, p. 10*), ±8 V op-amp supplies present on J3/J4 *(EVM Table 1-1, p. 3)* |
 | No acquisition bursts; heartbeat blinking 0.5 Hz | Working as designed — the board is still in the idle phase | Probes CONFIG once a second, converts nothing | Press S1 (P4.5) or S2 (P1.1). If the blink does not double, halt and read `g_phase` (0 = idle) |
 | Error LED on while idle, `g_err_cfg` climbing | The digital link failed *after* init — a wire pulled loose, EVM powered down, PHI board re-fitted | Keeps probing once a second; nothing converts | Same checks as `g_status = 0x02`; `g_cfg` holds the latest raw readback |
-| `g_err_frame` jumps by 1–2 exactly at the button press, then stops | Mode-change pipeline: the first readouts after arming were framed as `SR = 0` | Those samples rejected, streaming continues correctly | Expected only if the flush was shortened — `adc168_start_stream()` burns two conversions for this reason *(ADC §6.5.2.2, p. 26)* |
+| `g_err_frame` jumps by 1–2 exactly at the button press, then stops | Mode-change pipeline: FE/SR/PDE/CID edits take effect one read access late, so the first readouts after arming were framed by the *previous* settings | Those samples rejected, streaming continues correctly | Expected only if the flush was shortened — `adc168_start_stream()` burns two conversions for this reason *(ADC §6.5.2.2, p. 26)* |
 | Pressing a button does nothing | Wrong pin assumption, or the pull-up is not enabled | Stays idle | Confirm S1 = P4.5 / S2 = P1.1 on the board *(LP schematic, p. 37)*; check `P4REN`/`P1REN` setup in `clocks.c`, and that `PM5CTL0 & LOCKLPM5` was cleared |
 | No bus traffic at all; heartbeat LED dark | Tick timer never fires, or the firmware never got past init | — | Halt with `mspdebug` and read `g_tick` and `g_status` |
 | Rate slightly off 100 Hz | Expected — the timebase is the internal DCO, spec'd to roughly ±2 % | Ticks at 100 Hz ± 2 % | Nothing to fix; nothing measures absolute time from the tick. Change `TICK_PERIOD_SMCLK` in `board.h` if a different nominal rate is wanted |
@@ -1390,7 +1517,9 @@ flowchart TD
 - **BUSY** — ADC output, high during a conversion.
 - **Common mode** — the fixed voltage a pseudo-differential input is
   measured against (2.5 V here).
-- **CONVST** — conversion-start strobe; rising edge freezes the sample.
+- **CONVST** — conversion-start strobe; the rising edge freezes the sample
+  and the conversion begins on the first CLOCK rising edge after it. Held
+  high across that clock, released on the next one.
 - **CPOL / CPHA** — SPI clock polarity and phase; decide which clock edge
   moves and samples data.
 - **DCO** — the MSP430's internal RC oscillator.
@@ -1420,8 +1549,12 @@ flowchart TD
 - **Pseudo-differential** — each input measured against a shared fixed
   reference (vs. fully differential: pairs of inputs measured against each
   other).
-- **RD** — read strobe; falling edge starts data output and opens the
-  command window.
+- **RD** — read strobe; the rising edge starts data output on SDOA and opens
+  the 16-clock SDI command window. Like CONVST it straddles the first clock
+  of its burst ([§8.1](#81-placing-a-strobe-on-the-clock)).
+- **t1 / t2 / t3** — the ADC's strobe timings *(ADC §5.6, p. 9)*: t1 is
+  CONVST's setup to the first rising CLOCK edge (12 ns min); t2 and t3 are
+  the CONVST and RD high times, capped at one clock period.
 - **REFDAC / REFCM** — ADC registers controlling the internal reference
   DACs and which reference feeds each channel's common mode.
 - **SAR** — successive-approximation register, the ADC's conversion
@@ -1433,8 +1566,9 @@ flowchart TD
   red LED1) and P1.1 (right, beside the green LED2). Either one starts
   acquisition; both are active low with the MCU's internal pull-up.
 - **SR (special read)** — config bit that would make one RD strobe deliver both
-  converters' results. Set while streaming, clear during the idle probe —
-  which is why the phase change has to rewrite CONFIG.
+  converters' results. **0 in this build, in both phases** — plain Mode II,
+  one frame per read access. What the phase change rewrites is the `C` field:
+  the idle probe leaves `C = 00`, so streaming has to reinstate `C = ADC_PAIR`.
 - **Two's complement** — signed binary encoding; 0x8000 = −32768,
   0x7FFF = +32767.
 - **Watchdog (WDT)** — a timer that resets the chip unless periodically
@@ -1454,8 +1588,8 @@ keys are defined in [Reference documents](#reference-documents).
 | Page | Section / table | What it establishes | Used in |
 |---|---|---|---|
 | 3–4 | Table 4-1, Pin Functions | The seven digital wires; BUSY is high in hold and returns low when the conversion completes | [§7](#7-why-this-adc-is-not-a-normal-spi-device), [§10.3](#103-one-conversion--readout-adc168_read) |
-| 9–10 | §5.6 Timing Requirements, §5.7 Switching Characteristics | Bus timing limits; t_REFON = 8 ms max with C_REF = 22 µF | [§10.2](#102-the-initialization-sequence-adc168_init), [§16.2](#162-the-detail-behind-each-leaf) |
-| 10 | Figure 5-1, Detailed Timing Diagram: Half-Clock Mode | The waveform the driver reproduces; confirms the CPOL/CPHA choice | [§6](#6-what-spi-is) |
+| 9–10 | §5.6 Timing Requirements, §5.7 Switching Characteristics | Bus timing limits — **t1 = 12 ns CONVST-to-first-CLOCK setup, t2/t3 = CONVST/RD high time, max 1 t_CLK**; t_REFON = 8 ms max with C_REF = 22 µF | [§7](#7-why-this-adc-is-not-a-normal-spi-device), [§8.1](#81-placing-a-strobe-on-the-clock), [§10.2](#102-the-initialization-sequence-adc168_init), [§16.2](#162-the-detail-behind-each-leaf) |
+| 10 | Figure 5-1, Detailed Timing Diagram: Half-Clock Mode | The waveform the driver reproduces: CONVST/RD up before the first rising CLOCK edge, high at it, down within a clock period; confirms the CPOL/CPHA choice | [§6](#6-what-spi-is), [§8.1](#81-placing-a-strobe-on-the-clock) |
 | 16 | §6.2 Functional Block Diagram | Two independent converters behind two 4:1 muxes | [§5](#5-what-an-adc-is) |
 | 17 | §6.3.1.1 Analog Inputs; Tables 6-1, 6-2 | Fully-differential 2:1 vs pseudo-differential 4:1 mux maps; the pipelined "next CONVST" mux update; the SEQFIFO sentence that reads as a trap | [§5](#5-what-an-adc-is), [§10.2](#102-the-initialization-sequence-adc168_init), [§11](#11-reading-two-channels-why-a-pair) |
 | 18 | §6.3.1.1 (conversion start) | CONVST rising edge holds the inputs; 12 ns setup to the next CLOCK rising edge; never strobe CONVST while BUSY is high | [§7](#7-why-this-adc-is-not-a-normal-spi-device), [§10.3](#103-one-conversion--readout-adc168_read) |
@@ -1465,7 +1599,7 @@ keys are defined in [Reference documents](#reference-documents).
 | 23 | §6.4.1.4 Reset | The software reset the init sequence issues first | [§10.2](#102-the-initialization-sequence-adc168_init) |
 | 24 | §6.5.1 Read Data Input (RD); Table 6-7 Output Data Format | RD starts the readout and opens the SDI window; output code is binary two's complement | [§5](#5-what-an-adc-is), [§7](#7-why-this-adc-is-not-a-normal-spi-device), [§10.3](#103-one-conversion--readout-adc168_read), [§15](#15-number-formats-decoding-a-readout-burst-by-hand) |
 | 26 | §6.5.2.2 Mode II | "Changes to the FE, SR, PDE, and CID register bits are active … with a delay of one read access" — why init burns two conversions | [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§10.2](#102-the-initialization-sequence-adc168_init) |
-| 26 | §6.5.2.2 Mode II (half-clock mode only) | The readout arrangement this design uses: one read access, one 20-bit frame on SDOA, so a pair's two results take two accesses | [§2](#2-key-design-decisions), [§10.3](#103-one-conversion--readout-adc168_read), [§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming) |
+| 26 | §6.5.2.2 Mode II (half-clock mode only) | The readout arrangement this design uses: one read access, one 20-bit frame on SDOA, so a pair's two results take two accesses; also "make sure the CONVST and RD signals are not be longer than one clock cycle" | [§2](#2-key-design-decisions), [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§8.1](#81-placing-a-strobe-on-the-clock), [§10.3](#103-one-conversion--readout-adc168_read), [§10.4](#104-the-idle-probe-and-the-hand-over-to-streaming) |
 | 27 | §6.5.2.3 Special Read Mode II + Figure 6-7 | `SR = 1`: one RD, 40 clocks, both results on SDOA — the alternative this design does **not** use; also the frame layout and its fixed indicator/zero bits, which apply either way, and the "RD not longer than one clock cycle" rule | [§2](#2-key-design-decisions), [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§10.3](#103-one-conversion--readout-adc168_read), [§15](#15-number-formats-decoding-a-readout-burst-by-hand) |
 | 31 | §6.5.3 Programming the Reference DAC | The two-step address-then-value write pattern | [§5](#5-what-an-adc-is), [§10.2](#102-the-initialization-sequence-adc168_init) |
 | 32 | §7 Register Map, Table 7-1, Figure 7-1 | "All register updates become active with the CLOCK rising edge after completing the 16-clock-cycle write access" — why `write_word()` sends a third byte | [§8](#8-the-trick-that-makes-spi-work-anyway-the-gated-clock), [§10.1](#101-the-command-word) |

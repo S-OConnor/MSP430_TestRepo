@@ -63,8 +63,10 @@
  *            also opens a 16-CLOCK window during which whatever appears on
  *            SDI is latched as a command/register word. Like CONVST it is
  *            held across the access's first CLOCK and released on the second
- *            (SBASAW9 Figure 5-1); see rd_access() below.
- *    ~CS     gate for SDI/RD/SDOA; held low for the whole session.
+ *            (SBASAW9 Figure 5-1); see adc_access() below.
+ *    ~CS     gate for SDI/RD/SDOA. Asserted for the duration of ONE access
+ *            and released again between accesses, the way the PHI reference
+ *            board drives it (docs/workingADC.jpg) — see adc_access() below.
  *
  *  Mode strapping (EVM header J5): M0 pin strapped to GND, M1 left pulled
  *  high -> "Mode II" = channel pair chosen manually by a command word, data
@@ -135,28 +137,65 @@ static uint16_t s_link_readback;    /* raw CONFIG readback, published as g_cfg *
 #define ADC168_CWORD_BYTE   ((uint8_t)((ADC_PAIR & 0x03) << 6))
 
 /*
- * One RD-opened access — the single shape every exchange with this part takes:
- * RD asserted, then 3 bytes = 24 gated CLOCKs in one contiguous burst, with
- * RD released on the burst's SECOND rising CLOCK edge.
+ * ONE ACCESS — the single shape every exchange with this part takes:
  *
- * The strobe is NOT a pulse in the gap before the burst. Per the datasheet's
- * half-clock timing diagram (SBASAW9 Figure 5-1) RD goes high ahead of the
- * access — its rising edge is what makes the ADC start driving SDOA (t3) and
- * what opens the 16-CLOCK SDI command window — is still high at the first
- * rising CLOCK edge, and comes back down within one CLOCK period of it. The
- * PHI reference board in docs/workingADC.jpg produces exactly that shape.
+ *      ~CS    ‾‾‾|________________________|‾‾‾
+ *      strobe ______|‾‾‾‾‾‾|_________________
+ *      CLOCK  _________|‾|_|‾|_ ... _|‾|______
+ *                      24 clocks, one contiguous burst
  *
- * The split of work follows from that: spi_wait_ready() here, so the bus is
- * idle and nothing can block once the strobe is up, and then both strobe
- * edges inside spi_burst_strobe(), which is the only code that can place
- * them against the clock edges. Doing the waiting the other way round —
- * strobe, then poll the SPI — would put an open-ended wait inside the
- * strobe's high time, which the datasheet caps at one CLOCK period.
+ * ~CS is asserted for the access and released again as soon as the burst's
+ * last clock edge has gone by, so the bus returns to fully idle — clock low,
+ * ~CS high, both strobes low — between accesses. That is what the PHI
+ * reference board does in docs/workingADC.jpg, where ~CS frames each burst
+ * individually instead of sitting low across the whole session.
+ *
+ * Inside that frame sits the strobe (RD or CONVST), and it is NOT a pulse in
+ * the gap before the burst. Per the datasheet's half-clock timing diagram
+ * (SBASAW9 Figure 5-1) the strobe goes high ahead of the access — RD's rising
+ * edge is what makes the ADC start driving SDOA (t3) and what opens the
+ * 16-CLOCK SDI command window; CONVST's is what freezes the sample/holds — is
+ * still high at the first rising CLOCK edge, and comes back down within one
+ * CLOCK period of it (t2/t3).
+ *
+ * The split of work follows from that:
+ *
+ *   - spi_wait_ready() BEFORE ~CS falls, so the bus is provably idle and
+ *     nothing can block between ~CS, the strobe and the first clock edge.
+ *     Doing the waiting the other way round — assert, then poll the SPI —
+ *     would put an open-ended wait inside the strobe's high time, which the
+ *     datasheet caps at one CLOCK period.
+ *   - both strobe edges inside spi_burst_strobe(), which is the only code
+ *     that can place them against the clock edges it starts.
+ *   - spi_wait_ready() again before ~CS rises. spi_burst_strobe() returns
+ *     once the last byte has been received, which is the burst's final clock
+ *     edge, but UCBUSY can still be set for a few cycles afterwards; polling
+ *     it keeps the ~CS rising edge strictly after the last CLOCK edge, the
+ *     order the diagram draws. It costs nothing — the condition is already
+ *     true almost every time.
+ *
+ * ~CS gates SDI, RD and SDOA (§6.3.1, "Bring CS low to enable both serial
+ * outputs"); the only timing the datasheet puts on it is tD6 = 6 ns from the
+ * ~CS rising edge to SDOA tri-stating, which is far shorter than the single
+ * instruction between the edges here.
  */
-static void rd_access(const uint8_t *tx, uint8_t *rx)
+static void adc_access(const uint8_t *tx, uint8_t *rx,
+                       volatile uint8_t *port, uint8_t mask)
 {
     spi_wait_ready();
-    spi_burst_strobe(tx, rx, 3u, ADC_RD_PORT, ADC_RD_BIT);
+    ADC_CS_LOW();
+
+    spi_burst_strobe(tx, rx, 3u, port, mask);
+
+    spi_wait_ready();
+    ADC_CS_HIGH();
+}
+
+/* The RD-opened flavour: register writes, register reads and conversion
+ * readouts all go through here. */
+static void rd_access(const uint8_t *tx, uint8_t *rx)
+{
+    adc_access(tx, rx, ADC_RD_PORT, ADC_RD_BIT);
 }
 
 /*
@@ -294,8 +333,9 @@ uint8_t adc168_init(void)
 {
     uint8_t status = 0;
 
-    /* Assert ~CS once and leave it low: SDI/RD become live, SDOA drives. */
-    ADC_CS_LOW();
+    /* ~CS is NOT parked low here. Every access asserts and releases it for
+     * itself (see adc_access() above), so the line already idles high from
+     * clocks.c and each exchange below frames itself. */
 
     /* Software reset (A=0100): all registers to power-up defaults, any
      * ongoing conversion aborted. Interface is usable again ~20 ns later —
@@ -357,6 +397,7 @@ uint16_t adc168_link_readback(void)
  *
  *  Timeline (0.5 MHz SCLK — 2 us per clock; total ~150 us of bus time):
  *
+ *    ~CS    ‾|_____________|‾‾‾|____________|‾‾‾|____________|‾‾‾‾‾‾
  *    CONVST _|‾‾‾|___________________________________________________
  *    CLOCK  ___xxxxxxxxxxxxx____xxxxxxxxxxxx____xxxxxxxxxxxx_________
  *              24 conversion     24 readout      24 readout
@@ -368,6 +409,10 @@ uint16_t adc168_link_readback(void)
  *  Each strobe rises just before its burst and falls on the burst's SECOND
  *  rising CLOCK edge — it straddles the first clock rather than sitting in
  *  the gap before it (SBASAW9 Figure 5-1; spi_burst_strobe() in spi.c).
+ *
+ *  ~CS frames each of the three bursts on its own and goes back high in
+ *  between, so a tick shows three self-contained accesses on the scope
+ *  rather than one long selected window — the shape of docs/workingADC.jpg.
  *
  *  Three bursts of three bytes each: one to clock the conversion, then one
  *  read access per converter. With SR=0 a read access yields exactly one
@@ -399,22 +444,23 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
     }
 
     /* Freeze the sample-and-holds and clock the conversion in one go.
-     * spi_wait_ready() comes first, for the same reason as on a read access:
-     * the conversion starts on the first CLOCK rising edge after CONVST, so
-     * every cycle between the two is time the sample sits in hold, drooping,
-     * before the SAR gets to it. Then 3 bytes = 24 gated CLOCKs in one
-     * contiguous burst, comfortably above the required ~17.5 conversion + 2
-     * acquisition clocks. CONVST is asserted just ahead of the burst
-     * (spi_burst_strobe() raises it), is still high at the first rising CLOCK edge — the edge the conversion
+     * The adc_access() wrapper waits for an idle bus before anything
+     * moves, for the same reason as on a read access: the conversion starts
+     * on the first CLOCK rising edge after CONVST, so every cycle between the
+     * two is time the sample sits in hold, drooping, before the SAR gets to
+     * it. Then 3 bytes = 24 gated CLOCKs in one contiguous burst, comfortably
+     * above the required ~17.5 conversion + 2 acquisition clocks. CONVST is
+     * asserted just ahead of the burst (spi_burst_strobe() raises it), is
+     * still high at the first rising CLOCK edge — the edge the conversion
      * starts on — and is released by spi_burst_strobe() on the second, one
      * CLOCK period later, which is the width the datasheet draws (SBASAW9
-     * Figure 5-1). No RD was issued, so the ADC is not driving SDOA and
+     * Figure 5-1). ~CS goes low with it and comes back up once the burst
+     * ends, exactly as on a read access. No RD was issued, so the ADC is not
+     * driving SDOA and
      * ignores SDI — but we put the command byte in the first slot anyway: if
      * the part latched it unexpectedly it would command the SAME pair
      * (harmless). */
-    spi_wait_ready();
-    spi_burst_strobe(conv_tx, NULL, sizeof conv_tx,
-                     ADC_CONVST_PORT, ADC_CONVST_BIT);
+    adc_access(conv_tx, NULL, ADC_CONVST_PORT, ADC_CONVST_BIT);
 
     /* BUSY should already have fallen during the burst: the conversion ends
      * after the ~18th clock (36 us at 0.5 MHz) and the burst runs 24 clocks

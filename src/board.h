@@ -18,7 +18,9 @@
  *    P2.2        UCB0CLK         out    ->  7           CLOCK  (burst-gated)
  *    P1.6        UCB0SIMO        out    ->  15          SDI
  *    P1.7        UCB0SOMI        in     <-  1           SDOA
- *    P1.4        (GPIO)          out    ->  9           ~CS    (low = active)
+ *    P1.4        (GPIO)          out    ->  9           ~CS    (low = active;
+ *                                                       one access per
+ *                                                       assertion)
  *    P2.6        (GPIO)          out    ->  13          CONVST (rising edge
  *                                                       samples the inputs;
  *                                                       held over CLOCK 1)
@@ -61,10 +63,9 @@
 /* eUSCI_B0 bit-clock divider: SPI SCLK = SMCLK / ADC_SCLK_DIV.
  * 32 -> 16 MHz / 32 = 0.5 MHz, the bottom of the ADC's 0.5..20 MHz half-clock
  * window and the second of this design's two timings. The slow clock buys
- * margin against risk A in docs/PLAN.md (the CONVST/RD strobe-width spec is
- * written against a free-running clock) and against long jumper wires, at the
- * cost of a longer bus burst per tick (~135 us, still ~1.4 % of the 10 ms
- * tick).
+ * setup/hold margin on the jumper wires to the EVM, and it is what makes the
+ * CPU-timed strobe release below possible, at the cost of a longer bus burst
+ * per tick (~150 us, still ~1.5 % of the 10 ms tick).
  *
  * NOT a free one-line change any more: spi_burst_strobe() releases CONVST/RD
  * by watching SCLK edges from the CPU, which needs a half period long
@@ -133,7 +134,13 @@
  * these into one BIS.B/BIC.B/XOR.B instruction on the port address.        */
 
 /* ~CS (P1.4): the ADC ignores SDI/RD and tri-states SDOA while ~CS is high.
- * We drop it once at init and keep it low for the whole session. */
+ * It is asserted PER ACCESS — low just before the strobe and the burst it
+ * opens, high again as soon as that burst's last CLOCK edge has gone by — so
+ * the bus is fully idle (clock low, ~CS high, strobes low) between accesses.
+ * That is the shape the PHI reference board produces in docs/workingADC.jpg,
+ * and adc168m102.c's access() is the only caller. The single timing the
+ * datasheet attaches to the line is tD6 = 6 ns from the ~CS rising edge to
+ * SDOA tri-stating (SBASAW9 §5.7). */
 #define ADC_CS_LOW()        (P1OUT &= (uint8_t)~BIT4)   /* clear bit 4        */
 #define ADC_CS_HIGH()       (P1OUT |= BIT4)             /* set bit 4          */
 
