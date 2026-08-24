@@ -42,39 +42,45 @@ run it from the repo root to regenerate.)*
 
 ### Reading the diagram
 
-Each column is one statement of C, and the dotted verticals are the statement
-boundaries. The nine columns are, in order, exactly the calls the firmware
-makes:
+The dotted verticals are byte boundaries *inside* an access, and each access
+is one call. The two accesses are, in order, exactly what the firmware does:
 
 ```c
-ADC_CS_LOW();                                /* ~CS low, and it stays low    */
-write_word(0x1041)  ->  spi_wait_ready();    /* SPI idle + TXBUF free        */
-                        ADC_RD_PULSE();      /* falling edge opens the access*/
-                        spi_burst({0x10,     /* 24 contiguous SCLKs:         */
-                                   0x41,     /*   command MSB, command LSB,  */
-                                   0x00})    /*   activation edges           */
+ADC_CS_LOW();                                     /* ~CS low, and it stays low   */
+write_word(0x1041)  ->  spi_wait_ready();         /* SPI idle + TXBUF free       */
+                        spi_burst_strobe({0x10,   /* RD high, then 24 contiguous */
+                                          0x41,   /* SCLKs: command MSB, command */
+                                          0x00},  /* LSB, activation edges — and */
+                                         RD)      /* RD released on rising edge 2*/
 read_word()         ->  spi_wait_ready();
-                        ADC_RD_PULSE();
-                        spi_burst({0,0,0})   /* -> 0x04 0x10 0x40            */
+                        spi_burst_strobe({0,0,0}, /* -> 0x04 0x10 0x40           */
+                                         RD)
 ```
 
 Each `spi_burst()` is **one unbroken run of 24 clocks** — the byte boundaries
 inside it are invisible on the CLOCK lane, because the eUSCI's transmit buffer
 is reloaded while the previous byte is still shifting. MOSI/MISO show the
 actual bit levels, MSB first. The clock is parked low only *between* accesses,
-and that is where the strobes move. At `ADC_SCLK_DIV = 32` a cycle is 2 µs
-(0.5 MHz), so each access is 48 µs and the pair is ~96 µs of bus time.
+which is where RD rises. At `ADC_SCLK_DIV = 32` a cycle is 2 µs (0.5 MHz), so
+each access is 48 µs and the pair is ~96 µs of bus time.
 
-If you see the clock stall for roughly a bit time at each byte boundary, or a
-long lag between the RD edge and the first clock, the firmware is not using
-`spi_burst()`/`spi_wait_ready()` — that is exactly what they exist to prevent.
+RD is **not** a narrow pulse in the gap: it goes high a few hundred ns before the first
+rising CLOCK edge (t1, min 12 ns), is still high when the ADC samples it at
+that edge, and is released on the **second** rising edge — about one CLOCK
+period of high time, which is what t3 asks for and what the PHI reference
+board does (`docs/workingADC.jpg`).
+
+If you see the clock stall for roughly a bit time at each byte boundary, a
+long lag between RD rising and the first clock, or RD falling before the burst
+starts, the firmware is not using `spi_burst_strobe()`/`spi_wait_ready()` —
+that is exactly what they exist to prevent.
 
 | Signal | Pin | Behaviour during a register access |
 |---|---|---|
 | **CLOCK** | P2.2 / UCB0CLK | Gated: 24 contiguous cycles per access, idle low in between — no stall at the byte boundaries. |
 | **~CS** | P1.4 | Driven low once in `adc168_init()` and held low for the whole session. |
-| **CONVST** | P2.6 | Flat low. `ADC_CONVST_PULSE()` is never called on this path — it appears only in `adc168_read()`. |
-| **RD** | P4.2 | Idles low. `ADC_RD_PULSE()` drives it high then low; the **falling** edge — the last thing before the first clock burst — opens the access. |
+| **CONVST** | P2.6 | Flat low. A register access starts no conversion — CONVST only moves in `adc168_read()`. |
+| **RD** | P4.2 | Idles low. Rises a few hundred ns before the burst's first rising CLOCK edge, stays high across it, falls on the **second** rising edge. Both edges come from `spi_burst_strobe()`. |
 | **BUSY** | P1.5 | Flat low, since no conversion is running. |
 | **MOSI** | P1.6 / SDI | `0x10 0x41 0x00` in `write_word()` — the first 16 clocks are the SDI latch window that takes the command word, the last 8 supply the rising edge that makes the register update active. Idle `0x00` during `read_word()`. |
 | **MISO** | P1.7 / SDOA | Driven but discarded during `write_word()`. In `read_word()` it carries the 20-bit frame `[0][A/B ind][D15..D0][0 0]` plus 4 padding clocks — received as `0x04 0x10 0x40`. |
@@ -108,33 +114,38 @@ side, so the capture lands on a whole acquisition every time. Feed CLOCK (J5.7) 
 the **falling** edge (CPOL=0/CPHA=1, MSB first).
 
 ```
-CONVST _|‾|_________________________________________________
-CLOCK  ____24 conversion____24 readout____24 readout_________
+CONVST _|‾‾‾|_______________________________________________
+CLOCK  ___24 conversion_____24 readout____24 readout_________
 BUSY   ___|‾‾‾‾‾‾‾‾|_________________________________________
-RD     ____________________|‾|__________|‾|__________________
+RD     ___________________|‾‾‾|_______|‾‾‾|_________________
 SDOA   ---------------------[ frame A ]--[ frame B ]---------
 SDI    [0x40 0x00 0x00]-----[0x40 0x00 ]--[0x40 0x00 ]-------
 ```
 
+Each strobe rises just before its burst and falls on that burst's **second
+rising CLOCK edge**, so it straddles the first clock instead of sitting in the
+gap ahead of it — datasheet Figure 5-1, and the shape the PHI reference board
+produces in `docs/workingADC.jpg`.
+
 Three bursts of three bytes each. With `SR = 0` a read access delivers exactly
-one frame, so converter B needs its own RD pulse — that second strobe is the
+one frame, so converter B needs its own RD strobe — that second strobe is the
 only visible difference from the special-read arrangement.
 
 | Signal | Pin | Behaviour during one tick |
 |---|---|---|
-| **CONVST** | P2.6 → J5.13 | One ~190 ns pulse, while CLOCK is parked low. Rising edge freezes both sample-and-holds. |
+| **CONVST** | P2.6 → J5.13 | Rises a few hundred ns before the conversion burst's first CLOCK edge and falls on that burst's second rising edge (~1 t_CLK high). The rising edge freezes both sample-and-holds; the conversion starts on the first rising CLOCK edge. |
 | **BUSY** | P1.5 ← J5.5 | Rises with the conversion, falls after the ~18th CLOCK of the first burst. |
 | **CLOCK** | P2.2 → J5.7 | Three gated bursts of 24 cycles: one to convert, then one per read access. Idle low in the gaps, which is where the strobes move. |
-| **RD** | P4.2 → J5.11 | **Two** pulses, one before each readout burst; each falling edge starts one frame on SDOA. |
-| **SDOA** | P1.7 ← J5.1 | Silent until the first RD falls, then 20 bits of frame A (CHA1); silent again, then 20 bits of frame B (CHB1). The 4 trailing clocks of each burst are padding. |
+| **RD** | P4.2 → J5.11 | **Two** pulses of the same shape as CONVST, one straddling the first clock of each readout burst; each rising edge starts one frame on SDOA. |
+| **SDOA** | P1.7 ← J5.1 | Silent until the first RD rises, then 20 bits of frame A (CHA1); silent again, then 20 bits of frame B (CHB1). The 4 trailing clocks of each burst are padding. |
 | **SDI** | P1.6 → J5.15 | `0x40 0x00` — the constant channel command (`C = 01`, `R = 00` "update C only"). Latched during the first 16 clocks of *each* read access; re-asserting the same pair twice is harmless. |
 
 At `ADC_SCLK_DIV = 32` a clock cycle is 2 µs (0.5 MHz), so each of the three
 bursts is 48 µs of unbroken clocking. The gaps *between* bursts are CPU
 overhead, not specified delays — but each strobe sits tight against the burst
-it opens (a few hundred ns, fixed), because `spi_wait_ready()` does the
-waiting before the strobe rather than after it. The whole acquisition is
-~150 µs out of a 10.00 ms tick.
+it opens (a few hundred ns of lead, fixed), because `spi_wait_ready()` does the waiting
+*before* the strobe goes up and `spi_burst_strobe()` owns both of its edges.
+The whole acquisition is ~150 µs out of a 10.00 ms tick.
 
 ### Turning the readout into numbers
 

@@ -1,98 +1,98 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1128" height="541" viewBox="0 0 1128 541" role="img" aria-label="Bus timing for the ADC168M102 CONFIG readback">
+<svg xmlns="http://www.w3.org/2000/svg" width="1072" height="541" viewBox="0 0 1072 541" role="img" aria-label="Bus timing for the ADC168M102 CONFIG readback">
 <defs><pattern id="xc" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#dfe5ec"/><line x1="0" y1="0" x2="0" y2="6" stroke="#c3ccd6" stroke-width="1.4"/></pattern></defs>
-<rect width="1128" height="541" fill="#ffffff"/>
-<text x="14.0" y="32.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#101418" text-anchor="start">Reading the ADC CONFIG register — one column per statement</text>
+<rect width="1072" height="541" fill="#ffffff"/>
+<text x="14.0" y="32.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="18" font-weight="700" fill="#101418" text-anchor="start">Reading the ADC CONFIG register — RD strobed against the burst</text>
 <text x="14.0" y="53.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="11.5" font-weight="400" fill="#67727e" text-anchor="start">adc168_config_cycle(): write CONFIG 0x1041, then clock the reply off SDOA — the init link check, and the idle phase once a second.  SCLK 0.5 MHz, CPOL=0/CPHA=1, MSB first.</text>
-<rect x="242.0" y="118.0" width="422.0" height="318.0" fill="#f6f8fa"/>
-<line x1="242.0" y1="92.0" x2="664.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
+<rect x="242.0" y="118.0" width="394.0" height="318.0" fill="#f6f8fa"/>
+<line x1="242.0" y1="92.0" x2="636.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
 <line x1="242.0" y1="87.0" x2="242.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
-<line x1="664.0" y1="87.0" x2="664.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
-<text x="453.0" y="84.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#101418" text-anchor="middle">write_word(0x1041)</text>
-<rect x="664.0" y="118.0" width="422.0" height="318.0" fill="#f6f8fa"/>
-<line x1="664.0" y1="92.0" x2="1086.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
-<line x1="664.0" y1="87.0" x2="664.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
-<line x1="1086.0" y1="87.0" x2="1086.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
-<text x="875.0" y="84.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#101418" text-anchor="middle">read_word()</text>
+<line x1="636.0" y1="87.0" x2="636.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
+<text x="439.0" y="84.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#101418" text-anchor="middle">write_word(0x1041) → spi_burst_strobe(…, RD)</text>
+<rect x="636.0" y="118.0" width="394.0" height="318.0" fill="#f6f8fa"/>
+<line x1="636.0" y1="92.0" x2="1030.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
+<line x1="636.0" y1="87.0" x2="636.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
+<line x1="1030.0" y1="87.0" x2="1030.0" y2="92.0" stroke="#67727e" stroke-width="1.0"/>
+<text x="833.0" y="84.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12" font-weight="700" fill="#101418" text-anchor="middle">read_word() → spi_burst_strobe(…, RD)</text>
 <line x1="146.0" y1="120.0" x2="146.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
 <text x="194.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">ADC_CS_LOW()</text>
 <line x1="242.0" y1="120.0" x2="242.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="288.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">ADC_RD_PULSE()</text>
-<line x1="334.0" y1="120.0" x2="334.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="389.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">spi_xfer(0x10)</text>
-<line x1="444.0" y1="120.0" x2="444.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="499.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">spi_xfer(0x41)</text>
-<line x1="554.0" y1="120.0" x2="554.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="609.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">spi_xfer(0x00)</text>
-<line x1="664.0" y1="120.0" x2="664.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="710.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">ADC_RD_PULSE()</text>
-<line x1="756.0" y1="120.0" x2="756.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="811.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">spi_xfer(0x00)</text>
-<line x1="866.0" y1="120.0" x2="866.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="921.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">spi_xfer(0x00)</text>
-<line x1="976.0" y1="120.0" x2="976.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<text x="1031.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">spi_xfer(0x00)</text>
-<line x1="1086.0" y1="120.0" x2="1086.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
-<line x1="142.0" y1="154.0" x2="1112.0" y2="154.0" stroke="#eef2f5" stroke-width="1.0"/>
+<text x="274.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">RD ↑</text>
+<line x1="306.0" y1="120.0" x2="306.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<text x="361.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">tx 0x10</text>
+<line x1="416.0" y1="120.0" x2="416.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<text x="471.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">tx 0x41</text>
+<line x1="526.0" y1="120.0" x2="526.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<text x="581.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">tx 0x00</text>
+<line x1="636.0" y1="120.0" x2="636.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<text x="668.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">RD ↑</text>
+<line x1="700.0" y1="120.0" x2="700.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<text x="755.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">tx 0x00</text>
+<line x1="810.0" y1="120.0" x2="810.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<text x="865.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">tx 0x00</text>
+<line x1="920.0" y1="120.0" x2="920.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<text x="975.0" y="114.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="9.5" font-weight="400" fill="#101418" text-anchor="middle">tx 0x00</text>
+<line x1="1030.0" y1="120.0" x2="1030.0" y2="434.0" stroke="#8fa0b0" stroke-width="1.0" stroke-dasharray="3 3"/>
+<line x1="142.0" y1="154.0" x2="1056.0" y2="154.0" stroke="#eef2f5" stroke-width="1.0"/>
 <text x="134.0" y="142.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="700" fill="#0f766e" text-anchor="end">CLOCK</text>
 <text x="134.0" y="154.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="8.5" font-weight="400" fill="#67727e" text-anchor="end">P2.2 / UCB0CLK</text>
-<line x1="142.0" y1="198.0" x2="1112.0" y2="198.0" stroke="#eef2f5" stroke-width="1.0"/>
+<line x1="142.0" y1="198.0" x2="1056.0" y2="198.0" stroke="#eef2f5" stroke-width="1.0"/>
 <text x="134.0" y="186.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="700" fill="#64748b" text-anchor="end">~CS</text>
 <text x="134.0" y="198.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="8.5" font-weight="400" fill="#67727e" text-anchor="end">P1.4</text>
-<line x1="142.0" y1="242.0" x2="1112.0" y2="242.0" stroke="#eef2f5" stroke-width="1.0"/>
+<line x1="142.0" y1="242.0" x2="1056.0" y2="242.0" stroke="#eef2f5" stroke-width="1.0"/>
 <text x="134.0" y="230.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="700" fill="#94a3b8" text-anchor="end">CONVST</text>
 <text x="134.0" y="242.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="8.5" font-weight="400" fill="#67727e" text-anchor="end">P2.6</text>
-<line x1="142.0" y1="286.0" x2="1112.0" y2="286.0" stroke="#eef2f5" stroke-width="1.0"/>
+<line x1="142.0" y1="286.0" x2="1056.0" y2="286.0" stroke="#eef2f5" stroke-width="1.0"/>
 <text x="134.0" y="274.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="700" fill="#c2410c" text-anchor="end">RD</text>
 <text x="134.0" y="286.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="8.5" font-weight="400" fill="#67727e" text-anchor="end">P4.2</text>
-<line x1="142.0" y1="330.0" x2="1112.0" y2="330.0" stroke="#eef2f5" stroke-width="1.0"/>
+<line x1="142.0" y1="330.0" x2="1056.0" y2="330.0" stroke="#eef2f5" stroke-width="1.0"/>
 <text x="134.0" y="318.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="700" fill="#94a3b8" text-anchor="end">BUSY</text>
 <text x="134.0" y="330.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="8.5" font-weight="400" fill="#67727e" text-anchor="end">P1.5</text>
-<line x1="142.0" y1="374.0" x2="1112.0" y2="374.0" stroke="#eef2f5" stroke-width="1.0"/>
+<line x1="142.0" y1="374.0" x2="1056.0" y2="374.0" stroke="#eef2f5" stroke-width="1.0"/>
 <text x="134.0" y="362.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="700" fill="#1d4ed8" text-anchor="end">MISO</text>
 <text x="134.0" y="374.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="8.5" font-weight="400" fill="#67727e" text-anchor="end">P1.7 / SDOA</text>
-<line x1="142.0" y1="418.0" x2="1112.0" y2="418.0" stroke="#eef2f5" stroke-width="1.0"/>
+<line x1="142.0" y1="418.0" x2="1056.0" y2="418.0" stroke="#eef2f5" stroke-width="1.0"/>
 <text x="134.0" y="406.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="700" fill="#be123c" text-anchor="end">MOSI</text>
 <text x="134.0" y="418.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="8.5" font-weight="400" fill="#67727e" text-anchor="end">P1.6 / SDI</text>
-<polyline points="146.0,154.0 1112.0,154.0" fill="none" stroke="#0f766e" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="337.0,154.0 337.0,134.0 343.5,134.0 343.5,154.0 350.0,154.0 350.0,134.0 356.5,134.0 356.5,154.0 363.0,154.0 363.0,134.0 369.5,134.0 369.5,154.0 376.0,154.0 376.0,134.0 382.5,134.0 382.5,154.0 389.0,154.0 389.0,134.0 395.5,134.0 395.5,154.0 402.0,154.0 402.0,134.0 408.5,134.0 408.5,154.0 415.0,154.0 415.0,134.0 421.5,134.0 421.5,154.0 428.0,154.0 428.0,134.0 434.5,134.0 434.5,154.0 441.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="447.0,154.0 447.0,134.0 453.5,134.0 453.5,154.0 460.0,154.0 460.0,134.0 466.5,134.0 466.5,154.0 473.0,154.0 473.0,134.0 479.5,134.0 479.5,154.0 486.0,154.0 486.0,134.0 492.5,134.0 492.5,154.0 499.0,154.0 499.0,134.0 505.5,134.0 505.5,154.0 512.0,154.0 512.0,134.0 518.5,134.0 518.5,154.0 525.0,154.0 525.0,134.0 531.5,134.0 531.5,154.0 538.0,154.0 538.0,134.0 544.5,134.0 544.5,154.0 551.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="557.0,154.0 557.0,134.0 563.5,134.0 563.5,154.0 570.0,154.0 570.0,134.0 576.5,134.0 576.5,154.0 583.0,154.0 583.0,134.0 589.5,134.0 589.5,154.0 596.0,154.0 596.0,134.0 602.5,134.0 602.5,154.0 609.0,154.0 609.0,134.0 615.5,134.0 615.5,154.0 622.0,154.0 622.0,134.0 628.5,134.0 628.5,154.0 635.0,154.0 635.0,134.0 641.5,134.0 641.5,154.0 648.0,154.0 648.0,134.0 654.5,134.0 654.5,154.0 661.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="759.0,154.0 759.0,134.0 765.5,134.0 765.5,154.0 772.0,154.0 772.0,134.0 778.5,134.0 778.5,154.0 785.0,154.0 785.0,134.0 791.5,134.0 791.5,154.0 798.0,154.0 798.0,134.0 804.5,134.0 804.5,154.0 811.0,154.0 811.0,134.0 817.5,134.0 817.5,154.0 824.0,154.0 824.0,134.0 830.5,134.0 830.5,154.0 837.0,154.0 837.0,134.0 843.5,134.0 843.5,154.0 850.0,154.0 850.0,134.0 856.5,134.0 856.5,154.0 863.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="869.0,154.0 869.0,134.0 875.5,134.0 875.5,154.0 882.0,154.0 882.0,134.0 888.5,134.0 888.5,154.0 895.0,154.0 895.0,134.0 901.5,134.0 901.5,154.0 908.0,154.0 908.0,134.0 914.5,134.0 914.5,154.0 921.0,154.0 921.0,134.0 927.5,134.0 927.5,154.0 934.0,154.0 934.0,134.0 940.5,134.0 940.5,154.0 947.0,154.0 947.0,134.0 953.5,134.0 953.5,154.0 960.0,154.0 960.0,134.0 966.5,134.0 966.5,154.0 973.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="979.0,154.0 979.0,134.0 985.5,134.0 985.5,154.0 992.0,154.0 992.0,134.0 998.5,134.0 998.5,154.0 1005.0,154.0 1005.0,134.0 1011.5,134.0 1011.5,154.0 1018.0,154.0 1018.0,134.0 1024.5,134.0 1024.5,154.0 1031.0,154.0 1031.0,134.0 1037.5,134.0 1037.5,154.0 1044.0,154.0 1044.0,134.0 1050.5,134.0 1050.5,154.0 1057.0,154.0 1057.0,134.0 1063.5,134.0 1063.5,154.0 1070.0,154.0 1070.0,134.0 1076.5,134.0 1076.5,154.0 1083.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="146.0,178.0 189.0,178.0 199.0,198.0 1112.0,198.0" fill="none" stroke="#64748b" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="146.0,242.0 1112.0,242.0" fill="none" stroke="#94a3b8" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="250.0" y="233.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9.5" font-weight="400" fill="#67727e" text-anchor="start" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">ADC_CONVST_PULSE() is never called here — a register access starts no conversion</text>
-<polyline points="146.0,330.0 1112.0,330.0" fill="none" stroke="#94a3b8" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="146.0,154.0 1056.0,154.0" fill="none" stroke="#0f766e" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="309.0,154.0 309.0,134.0 315.5,134.0 315.5,154.0 322.0,154.0 322.0,134.0 328.5,134.0 328.5,154.0 335.0,154.0 335.0,134.0 341.5,134.0 341.5,154.0 348.0,154.0 348.0,134.0 354.5,134.0 354.5,154.0 361.0,154.0 361.0,134.0 367.5,134.0 367.5,154.0 374.0,154.0 374.0,134.0 380.5,134.0 380.5,154.0 387.0,154.0 387.0,134.0 393.5,134.0 393.5,154.0 400.0,154.0 400.0,134.0 406.5,134.0 406.5,154.0 413.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="419.0,154.0 419.0,134.0 425.5,134.0 425.5,154.0 432.0,154.0 432.0,134.0 438.5,134.0 438.5,154.0 445.0,154.0 445.0,134.0 451.5,134.0 451.5,154.0 458.0,154.0 458.0,134.0 464.5,134.0 464.5,154.0 471.0,154.0 471.0,134.0 477.5,134.0 477.5,154.0 484.0,154.0 484.0,134.0 490.5,134.0 490.5,154.0 497.0,154.0 497.0,134.0 503.5,134.0 503.5,154.0 510.0,154.0 510.0,134.0 516.5,134.0 516.5,154.0 523.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="529.0,154.0 529.0,134.0 535.5,134.0 535.5,154.0 542.0,154.0 542.0,134.0 548.5,134.0 548.5,154.0 555.0,154.0 555.0,134.0 561.5,134.0 561.5,154.0 568.0,154.0 568.0,134.0 574.5,134.0 574.5,154.0 581.0,154.0 581.0,134.0 587.5,134.0 587.5,154.0 594.0,154.0 594.0,134.0 600.5,134.0 600.5,154.0 607.0,154.0 607.0,134.0 613.5,134.0 613.5,154.0 620.0,154.0 620.0,134.0 626.5,134.0 626.5,154.0 633.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="703.0,154.0 703.0,134.0 709.5,134.0 709.5,154.0 716.0,154.0 716.0,134.0 722.5,134.0 722.5,154.0 729.0,154.0 729.0,134.0 735.5,134.0 735.5,154.0 742.0,154.0 742.0,134.0 748.5,134.0 748.5,154.0 755.0,154.0 755.0,134.0 761.5,134.0 761.5,154.0 768.0,154.0 768.0,134.0 774.5,134.0 774.5,154.0 781.0,154.0 781.0,134.0 787.5,134.0 787.5,154.0 794.0,154.0 794.0,134.0 800.5,134.0 800.5,154.0 807.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="813.0,154.0 813.0,134.0 819.5,134.0 819.5,154.0 826.0,154.0 826.0,134.0 832.5,134.0 832.5,154.0 839.0,154.0 839.0,134.0 845.5,134.0 845.5,154.0 852.0,154.0 852.0,134.0 858.5,134.0 858.5,154.0 865.0,154.0 865.0,134.0 871.5,134.0 871.5,154.0 878.0,154.0 878.0,134.0 884.5,134.0 884.5,154.0 891.0,154.0 891.0,134.0 897.5,134.0 897.5,154.0 904.0,154.0 904.0,134.0 910.5,134.0 910.5,154.0 917.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="923.0,154.0 923.0,134.0 929.5,134.0 929.5,154.0 936.0,154.0 936.0,134.0 942.5,134.0 942.5,154.0 949.0,154.0 949.0,134.0 955.5,134.0 955.5,154.0 962.0,154.0 962.0,134.0 968.5,134.0 968.5,154.0 975.0,154.0 975.0,134.0 981.5,134.0 981.5,154.0 988.0,154.0 988.0,134.0 994.5,134.0 994.5,154.0 1001.0,154.0 1001.0,134.0 1007.5,134.0 1007.5,154.0 1014.0,154.0 1014.0,134.0 1020.5,134.0 1020.5,154.0 1027.0,154.0" fill="none" stroke="#0f766e" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="146.0,178.0 189.0,178.0 199.0,198.0 1056.0,198.0" fill="none" stroke="#64748b" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="146.0,242.0 1056.0,242.0" fill="none" stroke="#94a3b8" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="250.0" y="233.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9.5" font-weight="400" fill="#67727e" text-anchor="start" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">CONVST never moves here — a register access starts no conversion</text>
+<polyline points="146.0,330.0 1056.0,330.0" fill="none" stroke="#94a3b8" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
 <text x="250.0" y="321.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9.5" font-weight="400" fill="#67727e" text-anchor="start" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">so BUSY never rises</text>
-<text x="331.0" y="259.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9" font-weight="400" fill="#c2410c" text-anchor="end" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">falling edge ▼</text>
-<text x="753.0" y="259.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9" font-weight="400" fill="#c2410c" text-anchor="end" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">falling edge ▼</text>
-<polyline points="146.0,286.0 248.0,286.0 248.0,266.0 334.0,266.0 334.0,286.0 670.0,286.0 670.0,266.0 756.0,266.0 756.0,286.0 1112.0,286.0" fill="none" stroke="#c2410c" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="146.0,418.0 1112.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<polyline points="337.0,418.0 350.0,418.0 350.0,418.0 363.0,418.0 363.0,418.0 376.0,418.0 376.0,398.0 389.0,398.0 389.0,418.0 402.0,418.0 402.0,418.0 415.0,418.0 415.0,418.0 428.0,418.0 428.0,418.0 441.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="389.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x10</text>
-<polyline points="447.0,418.0 460.0,418.0 460.0,398.0 473.0,398.0 473.0,418.0 486.0,418.0 486.0,418.0 499.0,418.0 499.0,418.0 512.0,418.0 512.0,418.0 525.0,418.0 525.0,418.0 538.0,418.0 538.0,398.0 551.0,398.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="499.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x41</text>
-<polyline points="557.0,418.0 570.0,418.0 570.0,418.0 583.0,418.0 583.0,418.0 596.0,418.0 596.0,418.0 609.0,418.0 609.0,418.0 622.0,418.0 622.0,418.0 635.0,418.0 635.0,418.0 648.0,418.0 648.0,418.0 661.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="609.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
-<polyline points="759.0,418.0 772.0,418.0 772.0,418.0 785.0,418.0 785.0,418.0 798.0,418.0 798.0,418.0 811.0,418.0 811.0,418.0 824.0,418.0 824.0,418.0 837.0,418.0 837.0,418.0 850.0,418.0 850.0,418.0 863.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="811.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
-<polyline points="869.0,418.0 882.0,418.0 882.0,418.0 895.0,418.0 895.0,418.0 908.0,418.0 908.0,418.0 921.0,418.0 921.0,418.0 934.0,418.0 934.0,418.0 947.0,418.0 947.0,418.0 960.0,418.0 960.0,418.0 973.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="921.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
-<polyline points="979.0,418.0 992.0,418.0 992.0,418.0 1005.0,418.0 1005.0,418.0 1018.0,418.0 1018.0,418.0 1031.0,418.0 1031.0,418.0 1044.0,418.0 1044.0,418.0 1057.0,418.0 1057.0,418.0 1070.0,418.0 1070.0,418.0 1083.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="1031.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
-<rect x="146.0" y="354.0" width="613.0" height="20.0" fill="url(#xc)" stroke="#b9c4cf" stroke-width="0.8"/>
-<polyline points="759.0,374.0 772.0,374.0 772.0,374.0 785.0,374.0 785.0,374.0 798.0,374.0 798.0,374.0 811.0,374.0 811.0,374.0 824.0,374.0 824.0,354.0 837.0,354.0 837.0,374.0 850.0,374.0 850.0,374.0 863.0,374.0" fill="none" stroke="#1d4ed8" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="811.0" y="347.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#1d4ed8" text-anchor="middle">0x04</text>
-<polyline points="869.0,374.0 882.0,374.0 882.0,374.0 895.0,374.0 895.0,374.0 908.0,374.0 908.0,354.0 921.0,354.0 921.0,374.0 934.0,374.0 934.0,374.0 947.0,374.0 947.0,374.0 960.0,374.0 960.0,374.0 973.0,374.0" fill="none" stroke="#1d4ed8" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<text x="921.0" y="347.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#1d4ed8" text-anchor="middle">0x10</text>
-<polyline points="979.0,374.0 992.0,374.0 992.0,354.0 1005.0,354.0 1005.0,374.0 1018.0,374.0 1018.0,374.0 1031.0,374.0" fill="none" stroke="#1d4ed8" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
-<rect x="1031.0" y="354.0" width="52.0" height="20.0" fill="url(#xc)" stroke="#b9c4cf" stroke-width="0.8"/>
-<text x="1031.0" y="347.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#1d4ed8" text-anchor="middle">0x40</text>
-<rect x="1083.0" y="354.0" width="29.0" height="20.0" fill="url(#xc)" stroke="#b9c4cf" stroke-width="0.8"/>
-<text x="451.0" y="367.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9.5" font-weight="400" fill="#67727e" text-anchor="middle" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">return value discarded</text>
-<text x="14.0" y="460.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#67727e" text-anchor="start">• Dotted verticals are statement boundaries. Each spi_xfer() is one gated burst of 8 SCLK cycles; between bursts the clock is parked low, which is why the strobes can be moved at all.</text>
-<text x="14.0" y="477.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#67727e" text-anchor="start">• RD idles low; ADC_RD_PULSE() drives it high then low, and the falling edge — the last thing before the first clock burst — is what opens the access.</text>
+<text x="338.0" y="259.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9" font-weight="400" fill="#c2410c" text-anchor="start" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">▼ released on rising edge 2</text>
+<text x="732.0" y="259.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9" font-weight="400" fill="#c2410c" text-anchor="start" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">▼ released on rising edge 2</text>
+<polyline points="146.0,286.0 296.0,286.0 296.0,266.0 335.0,266.0 335.0,286.0 690.0,286.0 690.0,266.0 729.0,266.0 729.0,286.0 1056.0,286.0" fill="none" stroke="#c2410c" stroke-width="2.0" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="146.0,418.0 1056.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<polyline points="309.0,418.0 322.0,418.0 322.0,418.0 335.0,418.0 335.0,418.0 348.0,418.0 348.0,398.0 361.0,398.0 361.0,418.0 374.0,418.0 374.0,418.0 387.0,418.0 387.0,418.0 400.0,418.0 400.0,418.0 413.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="361.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x10</text>
+<polyline points="419.0,418.0 432.0,418.0 432.0,398.0 445.0,398.0 445.0,418.0 458.0,418.0 458.0,418.0 471.0,418.0 471.0,418.0 484.0,418.0 484.0,418.0 497.0,418.0 497.0,418.0 510.0,418.0 510.0,398.0 523.0,398.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="471.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x41</text>
+<polyline points="529.0,418.0 542.0,418.0 542.0,418.0 555.0,418.0 555.0,418.0 568.0,418.0 568.0,418.0 581.0,418.0 581.0,418.0 594.0,418.0 594.0,418.0 607.0,418.0 607.0,418.0 620.0,418.0 620.0,418.0 633.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="581.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
+<polyline points="703.0,418.0 716.0,418.0 716.0,418.0 729.0,418.0 729.0,418.0 742.0,418.0 742.0,418.0 755.0,418.0 755.0,418.0 768.0,418.0 768.0,418.0 781.0,418.0 781.0,418.0 794.0,418.0 794.0,418.0 807.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="755.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
+<polyline points="813.0,418.0 826.0,418.0 826.0,418.0 839.0,418.0 839.0,418.0 852.0,418.0 852.0,418.0 865.0,418.0 865.0,418.0 878.0,418.0 878.0,418.0 891.0,418.0 891.0,418.0 904.0,418.0 904.0,418.0 917.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="865.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
+<polyline points="923.0,418.0 936.0,418.0 936.0,418.0 949.0,418.0 949.0,418.0 962.0,418.0 962.0,418.0 975.0,418.0 975.0,418.0 988.0,418.0 988.0,418.0 1001.0,418.0 1001.0,418.0 1014.0,418.0 1014.0,418.0 1027.0,418.0" fill="none" stroke="#be123c" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="975.0" y="391.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#be123c" text-anchor="middle">0x00</text>
+<rect x="146.0" y="354.0" width="557.0" height="20.0" fill="url(#xc)" stroke="#b9c4cf" stroke-width="0.8"/>
+<polyline points="703.0,374.0 716.0,374.0 716.0,374.0 729.0,374.0 729.0,374.0 742.0,374.0 742.0,374.0 755.0,374.0 755.0,374.0 768.0,374.0 768.0,354.0 781.0,354.0 781.0,374.0 794.0,374.0 794.0,374.0 807.0,374.0" fill="none" stroke="#1d4ed8" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="755.0" y="347.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#1d4ed8" text-anchor="middle">0x04</text>
+<polyline points="813.0,374.0 826.0,374.0 826.0,374.0 839.0,374.0 839.0,374.0 852.0,374.0 852.0,354.0 865.0,354.0 865.0,374.0 878.0,374.0 878.0,374.0 891.0,374.0 891.0,374.0 904.0,374.0 904.0,374.0 917.0,374.0" fill="none" stroke="#1d4ed8" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<text x="865.0" y="347.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#1d4ed8" text-anchor="middle">0x10</text>
+<polyline points="923.0,374.0 936.0,374.0 936.0,354.0 949.0,354.0 949.0,374.0 962.0,374.0 962.0,374.0 975.0,374.0" fill="none" stroke="#1d4ed8" stroke-width="1.7" stroke-linejoin="miter" stroke-linecap="butt"/>
+<rect x="975.0" y="354.0" width="52.0" height="20.0" fill="url(#xc)" stroke="#b9c4cf" stroke-width="0.8"/>
+<text x="975.0" y="347.0" font-family="'DejaVu Sans Mono','SFMono-Regular',Consolas,monospace" font-size="10" font-weight="700" fill="#1d4ed8" text-anchor="middle">0x40</text>
+<rect x="1027.0" y="354.0" width="29.0" height="20.0" fill="url(#xc)" stroke="#b9c4cf" stroke-width="0.8"/>
+<text x="423.0" y="367.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="9.5" font-weight="400" fill="#67727e" text-anchor="middle" stroke="#ffffff" stroke-width="3.2" paint-order="stroke" stroke-linejoin="round">return value discarded</text>
+<text x="14.0" y="460.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#67727e" text-anchor="start">• Dotted verticals are byte boundaries inside ONE burst: the three bytes of an access are clocked back to back, 24 unbroken SCLK cycles. Between accesses the clock is parked low, which is why RD can be moved at all.</text>
+<text x="14.0" y="477.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#67727e" text-anchor="start">• RD idles low. spi_burst_strobe() raises it a few hundred ns before the burst's first rising CLOCK edge (t1), holds it across that edge, and releases it on the SECOND rising edge — a high time of about one CLOCK period (t3).</text>
 <text x="14.0" y="494.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#67727e" text-anchor="start">• read_word() strips the frame's 2 leading indicator bits and trailing zeros: 0x04 0x10 0x40 → 0x1041. The last 4 clocks are padding past the 20-bit frame.</text>
 <rect x="20.0" y="502.0" width="22" height="11" fill="url(#xc)" stroke="#b9c4cf" stroke-width="0.8"/>
 <text x="48.0" y="511.0" font-family="'DejaVu Sans','Helvetica Neue',Arial,sans-serif" font-size="10.5" font-weight="400" fill="#67727e" text-anchor="start">line is undriven or its value is not used</text>

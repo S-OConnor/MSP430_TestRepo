@@ -60,7 +60,7 @@ selection is a compile-time constant, so there is no channel rotation. The idle
 phase uses exactly the same vocabulary — RD plus 24 clocks to write
 `CONFIG = 0x1041`, RD plus 24 clocks to read the reply, once a second — which
 is the nice consequence of dropping special read: every access on the bus is
-one RD pulse and three bytes, whether it carries a register or half a
+one RD strobe and three bytes, whether it carries a register or half a
 conversion. Because the probe word carries `C = 00`, the button press must
 rewrite the operating word (`0x5040`) and flush two conversions before the
 first sample is valid; without it the ADC would digitize pair 0 rather than
@@ -185,12 +185,16 @@ Put the scope on **SDOA** (EVM J5.1) with **CONVST** (J5.13) as the trigger,
 rising edge, single shot. Each tick produces one burst:
 
 ```
-CONVST _|‾|______________________________________________
-CLOCK  ____24 conversion clocks____40 readout clocks_____
+CONVST _|‾‾‾|____________________________________________
+CLOCK  ___24 conversion clocks__24 readout__24 readout___
 BUSY   ___|‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾|______________________________
-RD     _______________________|‾|________________________
-SDOA   -------------------------[ frame A ][ frame B ]---
+RD     _______________________|‾‾‾|_____|‾‾‾|___________
+SDOA   -------------------------[ frame A ]-[ frame B ]--
 ```
+
+CONVST and RD each rise just before their burst and fall on that burst's
+**second rising CLOCK edge** (datasheet t1/t2/t3, Figure 5-1) — they straddle
+the first clock rather than pulsing in the gap ahead of it.
 
 Each frame is 20 bits: `0`, an A/B indicator (0 = CHA1, 1 = CHB1), the 16-bit
 two's-complement result MSB-first, then two zeros. Code → voltage is

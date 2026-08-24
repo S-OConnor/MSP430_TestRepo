@@ -57,10 +57,13 @@
  *            in gated bursts from the SPI peripheral (allowed per §6.3.1.4).
  *    CONVST  rising edge: sample-and-holds freeze; conversion starts on the
  *            next CLOCK rising edge and takes ~18 CLOCKs (half-clock mode).
+ *            Held high across that first CLOCK, released on the second.
  *    BUSY    high while the conversion runs.
- *    RD      falling edge: the ADC starts driving result bits on SDOA; it
+ *    RD      rising edge: the ADC starts driving result bits on SDOA; it
  *            also opens a 16-CLOCK window during which whatever appears on
- *            SDI is latched as a command/register word.
+ *            SDI is latched as a command/register word. Like CONVST it is
+ *            held across the access's first CLOCK and released on the second
+ *            (SBASAW9 Figure 5-1); see rd_access() below.
  *    ~CS     gate for SDI/RD/SDOA; held low for the whole session.
  *
  *  Mode strapping (EVM header J5): M0 pin strapped to GND, M1 left pulled
@@ -74,8 +77,8 @@
  *  the two results of a conversion are fetched by two successive read
  *  accesses:
  *
- *      RD pulse, 24 clocks  -> converter A's frame (CHA<ADC_PAIR>)
- *      RD pulse, 24 clocks  -> converter B's frame (CHB<ADC_PAIR>)
+ *      RD + 24 clocks  -> converter A's frame (CHA<ADC_PAIR>)
+ *      RD + 24 clocks  -> converter B's frame (CHB<ADC_PAIR>)
  *
  *  (24 rather than 20 because the SPI moves whole bytes; the last 4 clocks
  *  are padding the ADC ignores.) The alternative, SR=1, packs both frames
@@ -132,21 +135,43 @@ static uint16_t s_link_readback;    /* raw CONFIG readback, published as g_cfg *
 #define ADC168_CWORD_BYTE   ((uint8_t)((ADC_PAIR & 0x03) << 6))
 
 /*
+ * One RD-opened access — the single shape every exchange with this part takes:
+ * RD asserted, then 3 bytes = 24 gated CLOCKs in one contiguous burst, with
+ * RD released on the burst's SECOND rising CLOCK edge.
+ *
+ * The strobe is NOT a pulse in the gap before the burst. Per the datasheet's
+ * half-clock timing diagram (SBASAW9 Figure 5-1) RD goes high ahead of the
+ * access — its rising edge is what makes the ADC start driving SDOA (t3) and
+ * what opens the 16-CLOCK SDI command window — is still high at the first
+ * rising CLOCK edge, and comes back down within one CLOCK period of it. The
+ * PHI reference board in docs/workingADC.jpg produces exactly that shape.
+ *
+ * The split of work follows from that: spi_wait_ready() here, so the bus is
+ * idle and nothing can block once the strobe is up, and then both strobe
+ * edges inside spi_burst_strobe(), which is the only code that can place
+ * them against the clock edges. Doing the waiting the other way round —
+ * strobe, then poll the SPI — would put an open-ended wait inside the
+ * strobe's high time, which the datasheet caps at one CLOCK period.
+ */
+static void rd_access(const uint8_t *tx, uint8_t *rx)
+{
+    spi_wait_ready();
+    spi_burst_strobe(tx, rx, 3u, ADC_RD_PORT, ADC_RD_BIT);
+}
+
+/*
  * Write one 16-bit word into the ADC.
  *
- * The RD pulse opens the SDI latch window; the next 16 CLOCK falling edges
- * (= our first two SPI bytes) clock the word in, MSB first.
+ * RD opens the SDI latch window; the next 16 CLOCK falling edges (= our first
+ * two SPI bytes) clock the word in, MSB first.
  *
  * The third, dummy byte matters: the datasheet says a register update only
  * becomes ACTIVE "with the CLOCK rising edge after completing the 16-clock
  * write access" (§7). With a free-running clock that edge arrives naturally;
  * with our gated clock it would never come until the next access — so we
  * append 8 extra clocks to deliver it immediately. All three bytes go out in
- * one spi_burst() so those 24 clocks are contiguous — the activation edge
- * has to be part of the same access, not a separate burst after a gap.
- *
- * spi_wait_ready() before the strobe is what keeps RD tight against the
- * first clock edge; see the note in read_access().
+ * one burst so those 24 clocks are contiguous — the activation edge has to be
+ * part of the same access, not a separate burst after a gap.
  */
 static void write_word(uint16_t w)
 {
@@ -154,18 +179,15 @@ static void write_word(uint16_t w)
                             (uint8_t)w,             /* bits  7..0 */
                             0x00u };                /* activation clocks */
 
-    spi_wait_ready();
-    ADC_RD_PULSE();
-    spi_burst(tx, NULL, sizeof tx);
+    rd_access(tx, NULL);
 }
 
 /*
- * One READ ACCESS — the single shape every reply from this part arrives in,
- * now that SR is 0 (§6.5.2.2): an RD pulse, then 3 bytes = 24 gated CLOCKs
- * in one contiguous burst.
+ * One READ ACCESS — the same RD-opened, 3-byte shape as a write (§6.5.2.2,
+ * now that SR is 0), read from the other direction.
  *
- * The RD falling edge makes the ADC start driving SDOA; the frame that comes
- * back is 20 bits and the last 4 clocks are padding the part ignores:
+ * RD makes the ADC start driving SDOA; the frame that comes back is 20 bits
+ * and the last 4 clocks are padding the part ignores:
  *
  *   b[0] = [lead 0][A/B ind][d15..d10]
  *   b[1] = [d9 .. d2]
@@ -173,7 +195,7 @@ static void write_word(uint16_t w)
  *
  * For a register read (A=0001 etc.) the middle 16 bits are the register
  * value; for a conversion readout they are one converter's result. The same
- * RD pulse also opens the 16-CLOCK SDI window, so `cmd` rides out in the
+ * RD assertion also opens the 16-CLOCK SDI window, so `cmd` rides out in the
  * first byte — callers pass the channel command there, or 0x00 when there is
  * nothing to say.
  */
@@ -181,20 +203,7 @@ static void read_access(uint8_t cmd, uint8_t *b)
 {
     const uint8_t tx[3] = { cmd, 0x00u, 0x00u };
 
-    /* Order matters here. The ADC captures RD on a CLOCK falling edge, so
-     * the strobe wants to sit immediately in front of the burst it opens —
-     * and the burst has to be one unbroken run of 24 clocks, because the
-     * part counts edges within an access.
-     *
-     * spi_wait_ready() does the waiting BEFORE the strobe, so all that is
-     * left between the RD falling edge and the first SCLK edge is the write
-     * to the transmit buffer: a fixed handful of cycles, the same on every
-     * access. Doing it the other way round — strobe, then wait for the SPI —
-     * puts an open-ended poll in exactly the place the ADC is least able to
-     * tolerate one. */
-    spi_wait_ready();
-    ADC_RD_PULSE();
-    spi_burst(tx, b, sizeof tx);
+    rd_access(tx, b);
 }
 
 /* The 16 payload bits of a read access, with the leading zero, the A/B
@@ -348,13 +357,17 @@ uint16_t adc168_link_readback(void)
  *
  *  Timeline (0.5 MHz SCLK — 2 us per clock; total ~150 us of bus time):
  *
- *    CONVST _|‾|_____________________________________________________
- *    CLOCK  ____xxxxxxxxxxxx____xxxxxxxxxxxx____xxxxxxxxxxxx_________
+ *    CONVST _|‾‾‾|___________________________________________________
+ *    CLOCK  ___xxxxxxxxxxxxx____xxxxxxxxxxxx____xxxxxxxxxxxx_________
  *              24 conversion     24 readout      24 readout
  *                  clocks        clocks (A)      clocks (B)
  *    BUSY   ___|‾‾‾‾‾‾‾‾|________________________________________
- *    RD     ___________________|‾|_____________|‾|_________________
+ *    RD     __________________|‾‾‾|_________|‾‾‾|_________________
  *    SDOA   --------------------[ frame A ]-----[ frame B ]--------
+ *
+ *  Each strobe rises just before its burst and falls on the burst's SECOND
+ *  rising CLOCK edge — it straddles the first clock rather than sitting in
+ *  the gap before it (SBASAW9 Figure 5-1; spi_burst_strobe() in spi.c).
  *
  *  Three bursts of three bytes each: one to clock the conversion, then one
  *  read access per converter. With SR=0 a read access yields exactly one
@@ -385,21 +398,23 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
         return ADC168_ERR_BUSY_TIMEOUT;
     }
 
-    /* Freeze the sample-and-holds; conversion arms for the next CLOCK edge.
-     * Primed first, for the same reason as the RD strobe: the conversion
-     * starts on the first CLOCK rising edge after CONVST, so every cycle
-     * between the two is time the sample sits in hold, drooping, before the
-     * SAR gets to it. */
-    spi_wait_ready();
-    ADC_CONVST_PULSE();
-
-    /* Feed the conversion: 3 bytes = 24 gated CLOCKs in one contiguous
-     * burst, comfortably above the required ~17.5 conversion + 2 acquisition
-     * clocks. No RD pulse was issued, so the ADC is not driving SDOA and
+    /* Freeze the sample-and-holds and clock the conversion in one go.
+     * spi_wait_ready() comes first, for the same reason as on a read access:
+     * the conversion starts on the first CLOCK rising edge after CONVST, so
+     * every cycle between the two is time the sample sits in hold, drooping,
+     * before the SAR gets to it. Then 3 bytes = 24 gated CLOCKs in one
+     * contiguous burst, comfortably above the required ~17.5 conversion + 2
+     * acquisition clocks. CONVST is asserted just ahead of the burst
+     * (spi_burst_strobe() raises it), is still high at the first rising CLOCK edge — the edge the conversion
+     * starts on — and is released by spi_burst_strobe() on the second, one
+     * CLOCK period later, which is the width the datasheet draws (SBASAW9
+     * Figure 5-1). No RD was issued, so the ADC is not driving SDOA and
      * ignores SDI — but we put the command byte in the first slot anyway: if
      * the part latched it unexpectedly it would command the SAME pair
      * (harmless). */
-    spi_burst(conv_tx, NULL, sizeof conv_tx);
+    spi_wait_ready();
+    spi_burst_strobe(conv_tx, NULL, sizeof conv_tx,
+                     ADC_CONVST_PORT, ADC_CONVST_BIT);
 
     /* BUSY should already have fallen during the burst: the conversion ends
      * after the ~18th clock (36 us at 0.5 MHz) and the burst runs 24 clocks
@@ -411,7 +426,7 @@ adc168_result_t adc168_read(int16_t *a, int16_t *b)
         return ADC168_ERR_BUSY_TIMEOUT;
     }
 
-    /* Readout, two read accesses: the first RD falling edge starts converter
+    /* Readout, two read accesses: the first RD rising edge starts converter
      * A's frame, the second starts converter B's. Each also opens a 16-CLOCK
      * SDI window, so the pair command rides out in both — re-asserting the
      * same selection twice is harmless (R=00 touches nothing else). */

@@ -20,9 +20,11 @@
  *    P1.7        UCB0SOMI        in     <-  1           SDOA
  *    P1.4        (GPIO)          out    ->  9           ~CS    (low = active)
  *    P2.6        (GPIO)          out    ->  13          CONVST (rising edge
- *                                                       samples the inputs)
- *    P4.2        (GPIO)          out    ->  11          RD     (falling edge
- *                                                       starts data output)
+ *                                                       samples the inputs;
+ *                                                       held over CLOCK 1)
+ *    P4.2        (GPIO)          out    ->  11          RD     (rising edge
+ *                                                       starts data output;
+ *                                                       held over CLOCK 1)
  *    P1.5        (GPIO)          in     <-  5           BUSY   (high while a
  *                                                       conversion runs)
  *    strap                                  17 -> GND   M0 = 0 (with M1 pulled
@@ -62,7 +64,13 @@
  * margin against risk A in docs/PLAN.md (the CONVST/RD strobe-width spec is
  * written against a free-running clock) and against long jumper wires, at the
  * cost of a longer bus burst per tick (~135 us, still ~1.4 % of the 10 ms
- * tick). Faster is a one-line change: 16 -> 1 MHz, 8 -> 2 MHz, 2 -> 8 MHz. */
+ * tick).
+ *
+ * NOT a free one-line change any more: spi_burst_strobe() releases CONVST/RD
+ * by watching SCLK edges from the CPU, which needs a half period long
+ * compared with its ~8-cycle poll loop. 32 (1 us per half period) is the
+ * bottom of that; spi.c carries an #error below it. To go faster, drive the
+ * strobe release from a timer capture/compare unit instead. */
 #define ADC_SCLK_DIV        32u
 
 /* Which channel pair the ADC converts, 0..3.
@@ -129,18 +137,52 @@
 #define ADC_CS_LOW()        (P1OUT &= (uint8_t)~BIT4)   /* clear bit 4        */
 #define ADC_CS_HIGH()       (P1OUT |= BIT4)             /* set bit 4          */
 
-/* CONVST (P2.6) rising edge moves the ADC's sample/holds from track to hold
- * and arms the conversion (it actually starts on the next CLOCK rising edge).
- * RD (P4.2) falling edge makes the ADC drive the first data bit on SDOA.
+/* CONVST (P2.6) and RD (P4.2) are the two access-opening strobes, and the
+ * datasheet times BOTH of them against the CLOCK edges of the access they
+ * open (SBASAW9 Figure 5-1, "Detailed Timing Diagram: Half-Clock Mode"):
  *
- * Both strobes are two back-to-back port writes: BIS.B then BIC.B, roughly
- * 190 ns at 16 MHz MCLK. The datasheet's "max one CLOCK period" pulse-width
- * rule assumes a free-running CLOCK; we only strobe while our gated SCLK is
- * sitting idle low, so no clock edge can ever land inside the pulse. At the
- * 0.5 MHz SCLK one clock period is 2 us, so the 190 ns pulse also satisfies
- * that rule literally - it would even on a free-running clock. */
-#define ADC_CONVST_PULSE()  do { P2OUT |= BIT6; P2OUT &= (uint8_t)~BIT6; } while (0)
-#define ADC_RD_PULSE()      do { P4OUT |= BIT2; P4OUT &= (uint8_t)~BIT2; } while (0)
+ *      CLOCK    ___|‾|_|‾|_|‾|_|‾|_        edge 1     edge 2
+ *      CONVST   __|‾‾‾‾‾‾‾‾|______         ^t1 before  ^released here
+ *      RD       __|‾‾‾‾‾‾‾‾|______
+ *
+ *   - the strobe goes HIGH at least t1 BEFORE the first rising CLOCK edge of
+ *     the burst, so it is already high when the ADC samples it there;
+ *   - it is released within one CLOCK period after that — the diagram's
+ *     hatched trailing edge — i.e. on the SECOND rising edge of the same
+ *     access. CONVST's rising edge freezes the sample/holds and the
+ *     conversion starts on the first CLOCK rising edge; RD's rising edge
+ *     makes the ADC start driving SDOA (t3), and the same access opens the
+ *     16-CLOCK SDI command window.
+ *
+ * So a strobe is NOT a pulse that fits in the gap between bursts: it spans
+ * the first clock of its burst. BOTH its edges are therefore written from
+ * inside spi_burst_strobe() (spi.c), which is the only code that can place
+ * them against the clock it starts — hence the port+bit pairs below, which
+ * is how a strobe is handed to it. The plain set/clear macros are there for
+ * anything that needs to move a strobe outside a burst.
+ *
+ * Budget: t2/t3 cap the high time at one CLOCK period (2 us at 0.5 MHz) and
+ * t1 asks for at least 12 ns of it before the first clock edge. We spend a
+ * few hundred nanoseconds of lead (one instruction plus the eUSCI's own
+ * start-up) and one CLOCK period of hold.
+ *
+ * (This mirrors the PHI reference board's capture in docs/workingADC.jpg,
+ * where CONVST and RD each straddle the first clocks of their burst.) */
+#define ADC_CONVST_PORT     (&P2OUT)
+#define ADC_CONVST_BIT      BIT6
+#define ADC_RD_PORT         (&P4OUT)
+#define ADC_RD_BIT          BIT2
+
+#define ADC_CONVST_HIGH()   (P2OUT |= BIT6)
+#define ADC_CONVST_LOW()    (P2OUT &= (uint8_t)~BIT6)
+#define ADC_RD_HIGH()       (P4OUT |= BIT2)
+#define ADC_RD_LOW()        (P4OUT &= (uint8_t)~BIT2)
+
+/* SCLK (P2.2) as an INPUT level. The pin is muxed to UCB0CLK, but PxIN always
+ * reflects the physical pin whatever function drives it, so the CPU can watch
+ * the bit clock it is generating and time a strobe release against real
+ * edges instead of against a counted delay. spi.c is the only user. */
+#define SPI_SCLK_HIGH()     ((P2IN & BIT2) != 0u)
 
 /* BUSY (P1.5): reads nonzero while a conversion is in progress. */
 #define ADC_BUSY()          (P1IN & BIT5)

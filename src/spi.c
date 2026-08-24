@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stddef.h>
 #include "board.h"
 #include "spi.h"
@@ -36,6 +37,13 @@
  *    1. an access should be ONE contiguous train of clocks, and
  *    2. the strobe that opens it should sit immediately before the first
  *       edge, with as little and as predictable a gap as possible.
+ *
+ *  (2) is where the strobe timing lives: CONVST and RD are not pulses that
+ *  fit in the quiet BEFORE a burst — the datasheet samples them at the
+ *  burst's FIRST rising CLOCK edge and lets them fall any time up to one
+ *  CLOCK period later. spi_burst_strobe() below therefore releases the
+ *  strobe from inside the burst, on the SECOND rising SCLK edge; see the
+ *  comment there and the diagram in board.h.
  *
  *  A naive byte-at-a-time routine gets both wrong, because it waits for
  *  UCRXIFG — "the byte has finished shifting" — before returning. The shift
@@ -103,9 +111,15 @@ void spi_wait_ready(void)
     }
 }
 
-void spi_burst(const uint8_t *tx, uint8_t *rx, uint8_t n)
+/*
+ * The shared body of both burst entry points: keep UCB0TXBUF fed and drain
+ * UCB0RXBUF until n bytes have come back. `sent` says how many bytes the
+ * caller already pushed into the transmit buffer (0 for a plain burst, 1 for
+ * a strobed one, which has to start the clock before it can time the strobe
+ * against it).
+ */
+static void burst_pump(const uint8_t *tx, uint8_t *rx, uint8_t n, uint8_t sent)
 {
-    uint8_t sent = 0u;
     uint8_t got = 0u;
 
     while (got < n) {
@@ -139,4 +153,112 @@ void spi_burst(const uint8_t *tx, uint8_t *rx, uint8_t n)
     /* Every byte has been received, so the shift register is empty and SCLK
      * is back at idle low: the caller may move a strobe as soon as this
      * returns. */
+}
+
+/*
+ * Spin until SCLK reaches the wanted level, i.e. until the next edge in that
+ * direction. This is a LEVEL poll of the real pin (P2IN, which reflects
+ * UCB0CLK whatever function drives it), so it self-calibrates: it finds the
+ * edge wherever the eUSCI actually put it, with no assumption about how many
+ * cycles pass between the UCB0TXBUF write and the first clock, and it keeps
+ * working if ADC_SCLK_DIV changes.
+ *
+ * It does assume the poll is fast compared with a half period, or a level
+ * could come and go unseen between two samples. The loop is a bit test, a
+ * branch and a guard decrement — about 8 cycles, 0.5 us at 16 MHz MCLK —
+ * against a half period of ADC_SCLK_DIV/2 = 16 cycles at the default divider.
+ * The #error below holds that margin if anyone speeds the bus up.
+ *
+ * The guard is a hang-stop only: if SCLK never moves (module in reset, pin
+ * unmuxed) the caller still returns instead of spinning forever, and the
+ * strobe simply drops early. It cannot expire in normal operation.
+ */
+#if (ADC_SCLK_DIV < 32u)
+#error "spi_burst_strobe() times the CONVST/RD release by polling SCLK, which \
+needs a half period comfortably longer than the ~8-cycle poll loop. Below \
+ADC_SCLK_DIV = 32 (0.5 MHz) that margin is gone - release the strobe from a \
+timer/PWM channel instead of from the CPU."
+#endif
+
+#define SCLK_EDGE_GUARD     2000u
+
+/* always_inline: at -Os gcc would otherwise leave these as calls, and the
+ * call/ret pair sits between the edge and the strobe release. */
+#define EDGE_INLINE  static inline __attribute__((always_inline))
+
+EDGE_INLINE void wait_sclk_high(void)
+{
+    uint16_t guard = SCLK_EDGE_GUARD;
+
+    while (!SPI_SCLK_HIGH() && (--guard != 0u)) {
+    }
+}
+
+EDGE_INLINE void wait_sclk_low(void)
+{
+    uint16_t guard = SCLK_EDGE_GUARD;
+
+    while (SPI_SCLK_HIGH() && (--guard != 0u)) {
+    }
+}
+
+void spi_burst_strobe(const uint8_t *tx, uint8_t *rx, uint8_t n,
+                      volatile uint8_t *port, uint8_t mask)
+{
+    /* Everything is resolved into registers up front — the strobe's address,
+     * both masks, the first byte — so that the assert, the clock start and
+     * the release are single instructions with nothing to fetch. The whole
+     * high time is charged against t2/t3 (max 1 t_CLK), and every cycle
+     * before the first clock edge comes out of that budget. */
+    volatile uint8_t *const strobe = port;
+    const uint8_t keep = (uint8_t)~mask;
+    const uint8_t first = tx[0];
+
+    /* From here to the release the timing is measured by watching SCLK edges
+     * go by, and a 10 ms tick interrupt landing in the middle would let one
+     * slip past unseen — the strobe would then be released a clock or more
+     * late, well outside the datasheet's window. It is a ~2.5 us critical
+     * section, and the only thing it can delay is the tick flag. Save and
+     * restore rather than blanket re-enable, so this is safe from any
+     * context. */
+    uint16_t irq_state = __get_interrupt_state();
+
+    __disable_interrupt();
+
+    /* The strobe goes high, then the clock starts — one instruction apart,
+     * ~250 ns at 16 MHz MCLK plus the eUSCI's own start-up. That is the
+     * datasheet's t1 (CONVST rising to first CLOCK rising, min 12 ns) with
+     * enormous margin, and it is the only part of the high time that is not
+     * clock-locked. The caller must already have run spi_wait_ready(), so
+     * UCB0TXBUF is free, SCLK is parked at idle low, and this write is what
+     * sets it running. */
+    *strobe |= mask;
+    UCB0TXBUF = first;
+
+    /* Follow the clock the eUSCI is now generating:
+     *   idle low -> HIGH   = rising edge 1  (the edge the ADC samples the
+     *                                        strobe on: it must still be high)
+     *            -> LOW    = falling edge 1
+     *            -> HIGH   = rising edge 2  (release point)
+     * At 0.5 MHz that is 2 us of polling inside the first byte's 16 us, so
+     * the second byte still gets loaded long before the shift register
+     * empties and the burst stays one contiguous train of clocks. */
+    wait_sclk_high();
+    wait_sclk_low();
+    wait_sclk_high();
+
+    /* One AND.B — the strobe falls within a few hundred ns of the second
+     * rising edge, inside that clock's high phase. Total high time is
+     * therefore a bit over one CLOCK period: the shape the datasheet draws
+     * and the shape the PHI reference board produces. */
+    *strobe &= keep;
+
+    __set_interrupt_state(irq_state);
+
+    burst_pump(tx, rx, n, 1u);
+}
+
+void spi_burst(const uint8_t *tx, uint8_t *rx, uint8_t n)
+{
+    burst_pump(tx, rx, n, 0u);
 }
